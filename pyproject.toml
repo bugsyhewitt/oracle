@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oracle-symexec"
+version = "0.1.0"
+description = "mythril's symbolic-execution capability, made install-clean on modern Python"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "bugsyhewitt" }]
+keywords = ["evm", "symbolic-execution", "smart-contract", "security", "z3", "mythril"]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Intended Audience :: Developers",
+]
+dependencies = [
+    # Z3 SMT solver — the engine of symbolic execution.
+    "z3-solver>=4.12,<5",
+    # Solidity compilation for .sol input (fetches solc on demand).
+    # Bytecode input and the test fixtures never require this at runtime.
+    "py-solc-x>=2.0,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+oracle = "oracle.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bugsyhewitt/oracle"
+
+[tool.setuptools.packages.find]
+include = ["oracle*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that invoke the real Z3 solver (excluded from default runs)",
+]
+# Default run excludes slow (Z3-invoking) tests.
+addopts = "-m 'not slow'"
+testpaths = ["tests"]
