@@ -19,9 +19,12 @@ classifiers = [
 dependencies = [
     # Z3 SMT solver — the engine of symbolic execution.
     "z3-solver>=4.12,<5",
-    # Solidity compilation for .sol input (fetches solc on demand).
-    # Bytecode input and the test fixtures never require this at runtime.
-    "py-solc-x>=2.0,<3",
+    # Shared EVM/Solidity primitives (bytecode loading, source compilation).
+    # The [solcx] extra pulls in py-solc-x for on-demand .sol compilation;
+    # bytecode input and the test fixtures never require it at runtime.
+    # evm-toolkit is zero-dependency aside from that extra, so it never
+    # threatens oracle's Python 3.13 install.
+    "evm-toolkit[solcx] @ git+https://github.com/bugsyhewitt/evm-toolkit",
 ]
 
 [project.optional-dependencies]
