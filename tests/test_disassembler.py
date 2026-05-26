@@ -36,3 +36,13 @@ def test_push32_consumes_32_immediate_bytes():
     d = Disassembly(code)
     assert d.by_pc[0].mnemonic == "PUSH32"
     assert d.by_pc[33].mnemonic == "STOP"
+
+
+def test_returndata_and_extcode_opcodes_are_in_table():
+    # EXTCODESIZE EXTCODECOPY RETURNDATASIZE RETURNDATACOPY EXTCODEHASH
+    d = Disassembly(bytes.fromhex("3b3c3d3e3f"))
+    assert d.by_pc[0].mnemonic == "EXTCODESIZE"
+    assert d.by_pc[1].mnemonic == "EXTCODECOPY"
+    assert d.by_pc[2].mnemonic == "RETURNDATASIZE"
+    assert d.by_pc[3].mnemonic == "RETURNDATACOPY"
+    assert d.by_pc[4].mnemonic == "EXTCODEHASH"

@@ -20,6 +20,8 @@ CONTRACTS = {
     "integer-overflow.sol": "IntegerOverflow",
     "reachable-selfdestruct.sol": "ReachableSelfdestruct",
     "deep-assertion.sol": "DeepAssertion",
+    "returndata-after-call.sol": "ReturnDataAfterCall",
+    "extcodesize-guard.sol": "ExtCodeSizeGuard",
 }
 
 

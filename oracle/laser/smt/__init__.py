@@ -16,6 +16,10 @@ from oracle.laser.smt.bitvec_helper import (
     BVMulNoOverflow,
     BVSubNoUnderflow,
     LShR,
+    AShr,
+    SDiv,
+    SMod,
+    SignExt,
 )
 
 from oracle.laser.smt.expression import Expression, simplify

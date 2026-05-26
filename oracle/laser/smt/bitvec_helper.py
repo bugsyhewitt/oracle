@@ -31,6 +31,36 @@ def LShR(a: BitVec, b: BitVec):
     return _arithmetic_helper(a, b, z3.LShR)
 
 
+def AShr(a: BitVec, b: BitVec) -> BitVec:
+    """Arithmetic (signed) right shift of `a` by `b` bits.
+
+    z3's `>>` operator on BitVecRef is the arithmetic (sign-replicating) shift,
+    which is exactly the EVM SAR semantics: the sign bit fills the vacated
+    high-order bits.
+    """
+    return _arithmetic_helper(a, b, lambda x, y: x >> y)
+
+
+def SDiv(a: BitVec, b: BitVec) -> BitVec:
+    """Two's-complement signed division (z3 `/` on BitVecRef is signed)."""
+    return _arithmetic_helper(a, b, lambda x, y: x / y)
+
+
+def SMod(a: BitVec, b: BitVec) -> BitVec:
+    """Two's-complement signed modulo (EVM SMOD; sign follows the dividend).
+
+    z3 distinguishes `SRem` (remainder, sign of dividend) from `%`
+    (modulo, sign of divisor). The EVM SMOD result takes the sign of the
+    dividend, which is z3's `SRem`.
+    """
+    return _arithmetic_helper(a, b, z3.SRem)
+
+
+def SignExt(extra_bits: int, bv: BitVec) -> BitVec:
+    """Sign-extend `bv` by `extra_bits` high-order bits."""
+    return BitVec(z3.SignExt(extra_bits, bv.raw), annotations=bv.annotations)
+
+
 @overload
 def If(a: Union[Bool, bool], b: Union[BitVec, int], c: Union[BitVec, int]) -> BitVec:
     ...

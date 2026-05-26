@@ -12,7 +12,23 @@ inside oracle's clean, bounded architecture.
 
 ## TIER 1 — High value, contained effort (ship next)
 
-### 1. Opcode coverage: RETURNDATASIZE / RETURNDATACOPY / EXTCODESIZE / EXTCODEHASH
+### 1. Opcode coverage: RETURNDATASIZE / RETURNDATACOPY / EXTCODESIZE / EXTCODEHASH ✅ IMPLEMENTED (Phase 2, Rotation 2)
+
+**Status:** Shipped. All five missing opcodes (`0x3B EXTCODESIZE`, `0x3C
+EXTCODECOPY`, `0x3D RETURNDATASIZE`, `0x3E RETURNDATACOPY`, `0x3F EXTCODEHASH`)
+were added to `opcodes.py` with conservative-sound `_op_*` handlers in `vm.py`
+(fresh symbolic words for the size/hash ops; no-op memory writes for the copy
+ops). The previously-missing arithmetic/bit handlers were also implemented with
+**correct EVM semantics** (not symbolic approximations): `SAR`, `SDIV`, `SMOD`,
+`ADDMOD` (256-bit-safe via 512-bit Concat intermediate), `MULMOD`,
+`SIGNEXTEND`, `BYTE`, `CALLDATACOPY`, `CODECOPY`, and `CODESIZE` (now the
+concrete bytecode length). New SMT helpers `AShr`, `SDiv`, `SMod`, `SignExt`.
+Two new fixtures (`returndata-after-call.sol`, `extcodesize-guard.sol`) prove
+the reachable SELFDESTRUCT downstream of an external call / extcodesize guard is
+now discoverable — both returned zero findings under v0.1, one finding now.
+Tests: `tests/test_opcodes_arithmetic.py` (24 concrete-value unit tests),
+`tests/test_opcodes_extcode.py` (8 stack-effect tests),
+`tests/test_post_call_paths.py` (integration + real-Z3 slow tests).
 
 **Why it matters:** These four opcodes are absent from oracle's VM (`vm.py` halts
 the path conservatively on any unhandled instruction). Solidity ≥0.5.0 emits

@@ -23,6 +23,12 @@ from oracle.laser.smt import (
     URem,
     If,
     LShR,
+    AShr,
+    SDiv,
+    SMod,
+    SignExt,
+    Concat,
+    Extract,
     BitVec,
     simplify,
     symbol_factory,
@@ -321,6 +327,111 @@ class SymbolicVM:
         state.pc = inst.pc + 1
         return [state]
 
+    def _op_sar(self, state, inst):
+        # SAR: arithmetic (sign-preserving) right shift. EVM stack is
+        # [shift, value] with shift on top, like SHR.
+        shift = state.pop()
+        value = state.pop()
+        state.push(simplify(AShr(value, shift)))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_sdiv(self, state, inst):
+        # signed division; EVM defines division by zero as 0.
+        a = state.pop()
+        b = state.pop()
+        state.push(simplify(If(b == _bvv(0), _bvv(0), SDiv(a, b))))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_smod(self, state, inst):
+        # signed modulo; EVM defines modulo by zero as 0. The result takes the
+        # sign of the dividend (z3 SRem semantics, via SMod).
+        a = state.pop()
+        b = state.pop()
+        state.push(simplify(If(b == _bvv(0), _bvv(0), SMod(a, b))))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_addmod(self, state, inst):
+        # (a + b) % N computed without 256-bit intermediate overflow, then
+        # truncated back to 256 bits. EVM: modulo by zero yields 0.
+        a = state.pop()
+        b = state.pop()
+        n = state.pop()
+        a512 = Concat(_bvv(0), a)
+        b512 = Concat(_bvv(0), b)
+        n512 = Concat(_bvv(0), n)
+        summed = a512 + b512
+        wide = URem(summed, n512)
+        result = Extract(255, 0, wide)
+        state.push(simplify(If(n == _bvv(0), _bvv(0), result)))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_mulmod(self, state, inst):
+        # (a * b) % N computed in a 512-bit intermediate to avoid wraparound,
+        # then truncated to 256 bits. EVM: modulo by zero yields 0.
+        a = state.pop()
+        b = state.pop()
+        n = state.pop()
+        a512 = Concat(_bvv(0), a)
+        b512 = Concat(_bvv(0), b)
+        n512 = Concat(_bvv(0), n)
+        product = a512 * b512
+        wide = URem(product, n512)
+        result = Extract(255, 0, wide)
+        state.push(simplify(If(n == _bvv(0), _bvv(0), result)))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_signextend(self, state, inst):
+        # SIGNEXTEND(b, x): treat x as a (b+1)-byte two's-complement value and
+        # sign-extend it to 256 bits. For b >= 31 the value is unchanged.
+        b = state.pop()
+        x = state.pop()
+        bc = self._concrete(simplify(b))
+        if bc is None or bc >= 31:
+            # symbolic byte index, or no-op extension: leave x unchanged
+            state.push(x)
+            state.pc = inst.pc + 1
+            return [state]
+        # bit index of the sign bit being extended from
+        sign_bit = bc * 8 + 7
+        low = Extract(sign_bit, 0, x)
+        extended = SignExt(255 - sign_bit, low)
+        state.push(simplify(extended))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_byte(self, state, inst):
+        # BYTE(i, x): the i-th byte of x counting from the most-significant
+        # (big-endian). i >= 32 yields 0. Result is zero-extended to 256 bits.
+        i = state.pop()
+        x = state.pop()
+        ic = self._concrete(simplify(i))
+        if ic is None:
+            # symbolic index: (x >> (248 - i*8)) & 0xff, computed symbolically
+            shift = _bvv(248) - (i * _bvv(8))
+            byte = LShR(x, shift) & _bvv(0xFF)
+            # if i >= 32 the shift amount wraps; mask the out-of-range case to 0
+            result = If(ULT(i, _bvv(32)), byte, _bvv(0))
+            state.push(simplify(result))
+            state.pc = inst.pc + 1
+            return [state]
+        if ic >= 32:
+            state.push(_bvv(0))
+            state.pc = inst.pc + 1
+            return [state]
+        high = 255 - ic * 8
+        low = high - 7
+        sel = Extract(high, low, x)  # the selected 8-bit byte
+        # zero-extend the 8-bit byte to 256 bits (248 zero high bits + byte)
+        result = Concat(symbol_factory.BitVecVal(0, 248), sel)
+        state.push(simplify(result))
+        state.pc = inst.pc + 1
+        return [state]
+
     # ---- environment ----
     def _op_calldataload(self, state, inst):
         offset = simplify(state.pop())
@@ -381,8 +492,75 @@ class SymbolicVM:
     _op_coinbase = lambda self, s, i: self._generic_env(s, i, "coinbase")
     _op_difficulty = lambda self, s, i: self._generic_env(s, i, "difficulty")
     _op_chainid = lambda self, s, i: self._generic_env(s, i, "chainid")
-    _op_codesize = lambda self, s, i: self._generic_env(s, i, "codesize")
     _op_msize = lambda self, s, i: self._generic_env(s, i, "msize")
+
+    def _op_codesize(self, state, inst):
+        # CODESIZE is the concrete length of the running contract's bytecode.
+        state.push(_bvv(len(self.disasm.bytecode)))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_returndatasize(self, state, inst):
+        # Size of the return data from the most recent external call. Unknown
+        # statically, so a fresh symbolic word (conservative-sound): the path
+        # continues rather than halting.
+        state.push(symbol_factory.BitVecSym(f"returndatasize_{inst.pc}", 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_returndatacopy(self, state, inst):
+        # RETURNDATACOPY destOffset, offset, size — copies return data into
+        # memory. Memory is modelled coarsely (MLOAD returns fresh symbols), so
+        # this is a sound no-op that keeps the path alive.
+        state.pop()  # destOffset
+        state.pop()  # offset
+        state.pop()  # size
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_extcodesize(self, state, inst):
+        # EXTCODESIZE addr — code size of an external account. Fresh symbol so
+        # access-control guards like `extcodesize(x) == 0` stay explorable.
+        state.pop()  # address
+        state.push(symbol_factory.BitVecSym(f"extcodesize_{inst.pc}", 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_extcodecopy(self, state, inst):
+        # EXTCODECOPY addr, destOffset, offset, size — copies external code into
+        # memory. No-op against the coarse memory model; continue the path.
+        state.pop()  # address
+        state.pop()  # destOffset
+        state.pop()  # offset
+        state.pop()  # size
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_extcodehash(self, state, inst):
+        # EXTCODEHASH addr — keccak of external account code. Fresh symbol.
+        state.pop()  # address
+        state.push(symbol_factory.BitVecSym(f"extcodehash_{inst.pc}", 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_calldatacopy(self, state, inst):
+        # CALLDATACOPY destOffset, offset, size — copies calldata into memory.
+        # Memory is modelled coarsely, so this is a sound no-op that keeps the
+        # path alive instead of halting on the unhandled opcode.
+        state.pop()  # destOffset
+        state.pop()  # offset
+        state.pop()  # size
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_codecopy(self, state, inst):
+        # CODECOPY destOffset, offset, size — copies the running contract's own
+        # code into memory. Code is not analysed as data here; no-op + continue.
+        state.pop()  # destOffset
+        state.pop()  # offset
+        state.pop()  # size
+        state.pc = inst.pc + 1
+        return [state]
 
     def _op_pc(self, state, inst):
         state.push(_bvv(inst.pc))

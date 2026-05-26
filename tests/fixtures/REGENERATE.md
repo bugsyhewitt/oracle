@@ -14,6 +14,8 @@ You only need to regenerate them if you change a `.sol` fixture.
 | `integer-overflow.sol` | `IntegerOverflow` | `integer-overflow.bin` |
 | `reachable-selfdestruct.sol` | `ReachableSelfdestruct` | `reachable-selfdestruct.bin` |
 | `deep-assertion.sol` | `DeepAssertion` | `deep-assertion.bin` |
+| `returndata-after-call.sol` | `ReturnDataAfterCall` | `returndata-after-call.bin` |
+| `extcodesize-guard.sol` | `ExtCodeSizeGuard` | `extcodesize-guard.bin` |
 
 `bytecode-selfdestruct.bin` is a **standalone bytecode-only fixture** (a copy of
 the selfdestruct runtime bytecode) used to prove bytecode-input mode works with
