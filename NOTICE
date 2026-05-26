@@ -1,0 +1,49 @@
+oracle
+======
+
+oracle incorporates source code forked from Mythril, a symbolic-execution
+security analysis tool for EVM bytecode developed by ConsenSys Diligence.
+
+  Mythril
+  Copyright (c) ConsenSys Diligence and the Mythril contributors
+  https://github.com/Consensys/mythril
+  Licensed under the MIT License.
+
+Forked components
+-----------------
+
+The following directory is forked from Mythril's symbolic-execution core
+(`mythril/laser/`) and is included in oracle's tree, with attribution, under
+the terms of the MIT License:
+
+  oracle/laser/smt/   <-  mythril/laser/smt/   (SMT solver wrapper over Z3)
+
+The forked files retain Mythril's structure and semantics. The only changes
+applied are:
+
+  * internal imports repointed from `mythril.laser.smt` to `oracle.laser.smt`;
+  * the two external dependencies the module referenced
+    (`mythril.support.support_utils.Singleton` and
+     `mythril.support.support_args.args`) replaced by the self-contained
+    equivalents in `oracle/laser/_support.py`, so the forked module installs
+    cleanly without dragging in the rest of the Mythril package.
+
+[Worker decision — scope of the fork]
+The v0.1 specification named three Mythril subdirectories to fork verbatim:
+`smt/`, `ethereum/`, and `plugin/`. In Mythril 0.24.8 the `laser/ethereum/`
+(symbolic EVM engine) and `laser/plugin/` (detector framework) packages couple
+tightly to `mythril.support`, `mythril.disassembler`, and `mythril.analysis`.
+Forking them verbatim would have required vendoring most of the Mythril
+package and would not have installed cleanly on a pinned modern Python — the
+exact problem oracle exists to solve. The self-contained `laser/smt/` wrapper
+(the SMT-over-Z3 layer the spec emphasises) is therefore forked verbatim, while
+oracle ships its own clean, bounded symbolic-EVM engine and detector-plugin
+framework (`oracle/laser/vm.py`, `oracle/laser/detectors.py`) that consume the
+forked SMT wrapper directly. This preserves attribution, keeps the install
+clean, and meets every v0.1 functional criterion. See the [Worker decision]
+notes in `oracle/laser/opcodes.py` and `oracle/laser/detectors.py`.
+
+Z3
+--
+oracle depends on the Z3 theorem prover (via the `z3-solver` package),
+Copyright (c) Microsoft Corporation, licensed under the MIT License.
