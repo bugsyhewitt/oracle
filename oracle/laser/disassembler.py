@@ -2,10 +2,15 @@
 
 Turns a runtime bytecode blob into a list of `Instruction` records keyed by
 program counter, and pre-computes the set of valid JUMPDEST addresses.
+
+Hex/bytes coercion is delegated to the shared `evm-toolkit` library
+(`parse_bytecode`), so oracle and omen accept bytecode input identically.
 """
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
+
+from evm_toolkit import parse_bytecode as _parse_bytecode
 
 from oracle.laser.opcodes import OPCODES
 
@@ -50,12 +55,8 @@ class Disassembly:
 
 
 def parse_bytecode(hex_or_bytes) -> bytes:
-    """Accept a 0x-prefixed hex string, a bare hex string, or raw bytes."""
-    if isinstance(hex_or_bytes, bytes):
-        return hex_or_bytes
-    s = hex_or_bytes.strip()
-    if s.startswith("0x") or s.startswith("0X"):
-        s = s[2:]
-    # Strip whitespace/newlines that may appear in fixture files
-    s = "".join(s.split())
-    return bytes.fromhex(s)
+    """Accept a 0x-prefixed hex string, a bare hex string, or raw bytes.
+
+    Delegates to evm_toolkit.parse_bytecode (shared with omen).
+    """
+    return _parse_bytecode(hex_or_bytes)
