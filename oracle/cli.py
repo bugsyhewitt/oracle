@@ -10,8 +10,11 @@ import sys
 from typing import List, Optional
 
 from oracle import __version__
+from oracle.laser.detectors import DETECTOR_REGISTRY
 
-CHECK_CHOICES = ["assertion", "overflow", "selfdestruct", "ether-leak", "storage-write", "all"]
+# derived from the detector registry so a newly-registered detector is exposed
+# on the CLI automatically (no second source of truth to keep in sync).
+CHECK_CHOICES = list(DETECTOR_REGISTRY.keys()) + ["all"]
 INPUT_CHOICES = ["sol", "bytecode"]
 FORMAT_CHOICES = ["json", "h1md"]
 

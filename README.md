@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,all}]
        [--max-depth N]            # default 12
        [--format {json,h1md}]     # default json
 ```
@@ -145,6 +145,19 @@ oracle --contract <yourcontract>.sol \
 
 Flags an `SSTORE` whose slot key is attacker-controllable
 (`category: "arbitrary_storage_write"`).
+
+### `reentrancy` — check-effects-interactions violation
+
+```bash
+oracle --contract tests/fixtures/reentrancy_vuln.sol \
+       --input-type sol --check reentrancy --format json
+```
+
+Flags the classic withdraw-before-update bug (`category: "reentrancy"`): a
+storage slot is `SLOAD`ed, an external `CALL`/`CALLCODE`/`DELEGATECALL` hands
+control to a potentially re-entrant callee, and only *after* the call is that
+same slot `SSTORE`d. The correct check-effects-interactions ordering
+(`SSTORE` before the call, as in `reentrancy_safe.sol`) is **not** flagged.
 
 ### bytecode input (no solc)
 

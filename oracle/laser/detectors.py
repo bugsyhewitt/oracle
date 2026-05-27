@@ -25,6 +25,7 @@ SEVERITY = {
     "reachable_selfdestruct": "high",
     "unconstrained_ether_transfer": "high",
     "arbitrary_storage_write": "high",
+    "reentrancy": "high",
 }
 
 
@@ -132,6 +133,76 @@ class StorageWriteDetector(DetectorHook):
             self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class ReentrancyDetector(DetectorHook):
+    """Detects the classic check-effects-interactions (CEI) violation.
+
+    The unsafe pattern is: read a storage slot, make an external CALL that
+    forwards ether (so the callee can re-enter), and only *after* the call
+    write back to a slot that was read *before* the call. A reentered call
+    sees the stale pre-update storage and can drain funds (the DAO bug).
+
+    Per-path tracking (state carries the history across forks):
+      * `state.sloads_seen` — identity keys of every slot SLOADed so far.
+      * On an ether-forwarding CALL/CALLCODE/DELEGATECALL: set `call_checkpoint`
+        and snapshot the slots read up to that point into `sloads_before_call`.
+      * On an SSTORE *after* a checkpoint whose slot is in `sloads_before_call`:
+        emit a reentrancy finding (effect applied after the interaction).
+
+    A slot's identity is the string form of its (possibly symbolic) key, so a
+    slot read as `storage[k]` matches a later write to the same `storage[k]`.
+
+    [Worker decision: the "forwards ether" gate. oracle initialises storage as a
+    constant-0 array, so a call value derived from storage (the canonical
+    `withdraw` amount) symbolically collapses to a concrete 0 — making a strict
+    `value != 0` gate inert against the very pattern this detector targets. The
+    sound reading: CALL / CALLCODE / DELEGATECALL can all forward value and hand
+    control to an attacker, so each opens a checkpoint; only STATICCALL (which
+    can neither transfer value nor mutate state, hence can never enable a
+    re-entrant *effect*) is excluded — and STATICCALL is not inspected here. A
+    provably non-zero concrete or symbolic value is still strictly stronger
+    evidence, but absence of it is not treated as proof of a zero-value call.
+    The discriminating signal is therefore the CEI ordering itself — a pre-call
+    SLOAD slot written after the call — which is precisely the bug.]
+    """
+
+    category = "reentrancy"
+
+    # opcodes that hand control to an external account while able to forward
+    # value (DELEGATECALL/CALLCODE run callee code in this contract's context
+    # and forward the current call's value). STATICCALL is deliberately absent.
+    _CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL")
+
+    def inspect(self, vm, state, instruction) -> None:
+        op = instruction.mnemonic
+        if op == "SLOAD":
+            if state.stack:
+                state.sloads_seen.add(_slot_key(state.stack[-1]))
+            return
+        if op in self._CALL_OPS:
+            self._open_checkpoint(state)
+            return
+        if op == "SSTORE" and state.call_checkpoint:
+            if not state.stack:
+                return
+            slot = _slot_key(state.stack[-1])
+            if slot in state.sloads_before_call:
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+    @staticmethod
+    def _open_checkpoint(state) -> None:
+        state.call_checkpoint = True
+        # snapshot only the slots read *before* this interaction
+        state.sloads_before_call = set(state.sloads_seen)
+
+
+def _slot_key(bv) -> str:
+    """A stable identity for a storage slot key (concrete or symbolic)."""
+    raw = bv.raw if hasattr(bv, "raw") else bv
+    return str(raw)
+
+
 # ---------------------------------------------------------------------- #
 # helpers
 # ---------------------------------------------------------------------- #
@@ -180,4 +251,5 @@ DETECTOR_REGISTRY = {
     "selfdestruct": ReachableSelfdestructDetector,
     "ether-leak": EtherLeakDetector,
     "storage-write": StorageWriteDetector,
+    "reentrancy": ReentrancyDetector,
 }

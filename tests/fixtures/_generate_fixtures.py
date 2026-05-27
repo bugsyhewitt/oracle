@@ -22,6 +22,8 @@ CONTRACTS = {
     "deep-assertion.sol": "DeepAssertion",
     "returndata-after-call.sol": "ReturnDataAfterCall",
     "extcodesize-guard.sol": "ExtCodeSizeGuard",
+    "reentrancy_vuln.sol": "ReentrancyVuln",
+    "reentrancy_safe.sol": "ReentrancySafe",
 }
 
 

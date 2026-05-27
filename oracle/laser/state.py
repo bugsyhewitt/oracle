@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Set
 
 from oracle.laser.smt import BaseArray, BitVec, K
 
@@ -43,6 +43,14 @@ class MachineState:
         self.trace: List[TraceEntry] = []
         self.halted: bool = False
         self.reverted: bool = False
+        # Reentrancy tracking (consumed by ReentrancyDetector). These live on
+        # the machine state so they propagate correctly across path forks: a
+        # set of storage-slot identity keys SLOADed so far on this path, a flag
+        # marking that a value-forwarding external CALL has occurred, and the
+        # snapshot of slots that had been read *before* that call.
+        self.sloads_seen: Set[str] = set()
+        self.call_checkpoint: bool = False
+        self.sloads_before_call: Set[str] = set()
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -55,6 +63,10 @@ class MachineState:
         new.trace = list(self.trace)
         new.halted = self.halted
         new.reverted = self.reverted
+        # copy reentrancy tracking so each forked path carries its own history
+        new.sloads_seen = set(self.sloads_seen)
+        new.call_checkpoint = self.call_checkpoint
+        new.sloads_before_call = set(self.sloads_before_call)
         return new
 
     def fork_world(self) -> None:
