@@ -33,6 +33,7 @@ from oracle.laser.smt import (
     simplify,
     symbol_factory,
 )
+from oracle.laser.smt.keccak import keccak_model
 from oracle.laser.state import (
     MachineState,
     StackOverflowError,
@@ -587,9 +588,49 @@ class SymbolicVM:
         return [state]
 
     def _op_sha3(self, state, inst):
-        state.pop()
-        state.pop()
-        state.push(symbol_factory.BitVecSym(f"sha3_{inst.pc}", 256))
+        """SHA3 / KECCAK256: pop (offset, size) from stack, push the hash.
+
+        We use the keccak uninterpreted-function model so Z3 can reason about
+        hash relationships (injectivity) rather than treating each call as an
+        independent fresh symbol.
+
+        Dispatch logic (based on the concrete byte-size operand):
+        * size == 32  → single 256-bit word; read one word from memory and
+                        apply keccak256_256(word).
+        * size == 64  → two 256-bit words (Solidity mapping-slot pattern);
+                        read two words and apply keccak256_512(hi || lo).
+        * otherwise   → fall back to a fresh symbol (conservative / sound).
+
+        Memory is modelled coarsely (MLOAD returns a per-PC symbol), so for
+        fixed sizes we look up the symbolic memory words at the given offsets.
+        """
+        mem_offset = state.pop()
+        mem_size = state.pop()
+        size_c = self._concrete(simplify(mem_size))
+        offset_c = self._concrete(simplify(mem_offset))
+
+        if size_c == 32:
+            # Single 256-bit word: create a symbolic memory read at the offset
+            # or generate a fresh word symbol when the offset is also symbolic.
+            if offset_c is not None:
+                word = symbol_factory.BitVecSym(f"mem_sha3_{offset_c}", 256)
+            else:
+                word = symbol_factory.BitVecSym(f"mem_sha3_{inst.pc}_w", 256)
+            result = keccak_model.hash_256(word)
+        elif size_c == 64:
+            # Two 256-bit words (e.g. keccak256(abi.encode(key, slot))).
+            if offset_c is not None:
+                hi = symbol_factory.BitVecSym(f"mem_sha3_{offset_c}_hi", 256)
+                lo = symbol_factory.BitVecSym(f"mem_sha3_{offset_c + 32}_lo", 256)
+            else:
+                hi = symbol_factory.BitVecSym(f"mem_sha3_{inst.pc}_hi", 256)
+                lo = symbol_factory.BitVecSym(f"mem_sha3_{inst.pc}_lo", 256)
+            result = keccak_model.hash_512(hi, lo)
+        else:
+            # Unknown / variable size — conservative fresh symbol (sound).
+            result = symbol_factory.BitVecSym(f"sha3_{inst.pc}", 256)
+
+        state.push(result)
         state.pc = inst.pc + 1
         return [state]
 
