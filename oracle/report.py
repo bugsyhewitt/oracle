@@ -266,6 +266,37 @@ def format_sarif(findings: List[dict], contract: str) -> str:
     return json.dumps(sarif, indent=2)
 
 
+def format_coverage_lcov(coverage: dict, contract: str) -> str:
+    """Render instruction coverage as an LCOV tracefile.
+
+    LCOV is the line-coverage interchange format `genhtml`, Codecov, Coveralls,
+    and GitHub coverage actions all ingest — the same format Halmos v0.3.0 emits.
+    oracle works on EVM bytecode, so each *instruction* is one coverage "line":
+    the program counter maps to a 1-based line (`pc + 1`, consistent with the
+    SARIF location mapping). A covered instruction has hit count `1`, an
+    uncovered one `0`. This lets a CI run surface "oracle reached 62% of this
+    contract's instructions" with no glue code, distinguishing a genuine
+    all-clear from an exploration that pruned most of the contract.
+
+    `coverage` is the dict returned by `analysis.compute_coverage`.
+    """
+    covered = set(coverage.get("covered_pcs", []))
+    uncovered = set(coverage.get("uncovered_pcs", []))
+    all_pcs = sorted(covered | uncovered)
+
+    lines: List[str] = []
+    lines.append("TN:oracle")
+    lines.append(f"SF:{contract}")
+    for pc in all_pcs:
+        hits = 1 if pc in covered else 0
+        # LCOV lines are 1-based; pc 0 -> line 1 (matches the SARIF mapping).
+        lines.append(f"DA:{pc + 1},{hits}")
+    lines.append(f"LF:{len(all_pcs)}")
+    lines.append(f"LH:{len(covered)}")
+    lines.append("end_of_record")
+    return "\n".join(lines) + "\n"
+
+
 def format_report(findings: List[dict], contract: str, fmt: str) -> str:
     if fmt == "json":
         return format_json(findings, contract)

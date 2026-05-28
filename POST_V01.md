@@ -298,6 +298,47 @@ items are both blocked: #7 (counterexample validator) requires `py-evm`, and #10
 
 ---
 
+### 12. LCOV instruction-coverage output (`--coverage`) ✅ IMPLEMENTED (Phase 2, Rotation 11)
+
+**Status:** Shipped. Added a `--coverage PATH` CLI flag that writes an LCOV
+tracefile reporting which EVM instructions the symbolic exploration reached.
+The VM now records `visited_pcs` (every pc an instruction was executed at,
+across all paths) in `_step`; a new `analysis.compute_coverage` re-runs the
+*same* bounded exploration `analyze` uses — same detectors registered, same
+`--max-depth`/`--sequence-depth` honoured — and diffs the visited pcs against
+the full disassembly to produce `{total_instructions, covered_instructions,
+coverage_pct, covered_pcs, uncovered_pcs}`. A new `report.format_coverage_lcov`
+renders that as an LCOV tracefile (`TN`/`SF`/`DA:<pc+1>,<hits>`/`LF`/`LH`/
+`end_of_record`), with each instruction mapped to a 1-based line via `pc + 1`
+(consistent with the SARIF location mapping). The CLI writes the file and prints
+a one-line summary (`coverage: 136/173 instructions (78.61%) -> PATH`) to
+stderr; findings still go to stdout in the requested `--format`. No Z3 is
+involved — coverage is a pure property of exploration, so it works under the
+mocked-solver default test run. No new dependency. Tests: five `compute_coverage`
+cases in `tests/test_analysis.py` (shape, totals-match-disassembly, sorted/real
+pcs, deeper-depth-covers-more monotonicity, unknown-check raises), five LCOV
+formatter cases in `tests/test_report.py` (header/footer, DA pc→line+hits
+mapping, LF/LH counts, empty contract, all-covered), and five CLI cases in
+`tests/test_cli.py` (flag default/parse, help listing, end-to-end file write +
+stderr summary, bad-path exit 2).
+
+**Why it matters:** oracle's exploration is bounded (depth cap, halting opcodes,
+reverts), so a "0 findings" run is only trustworthy if you know oracle actually
+reached the relevant code. Coverage tells a "0 findings" run apart from an
+under-explored one and tells the user when to raise `--max-depth`. LCOV is the
+format Halmos v0.3.0 emits and that `genhtml`/Codecov/Coveralls/GitHub coverage
+actions ingest directly — serving oracle's "clean, scriptable symbolic engine"
+niche the same way the Rotation 10 SARIF item did. Selected for Rotation 11
+because the two remaining *numbered* roadmap items are both blocked: #7
+(counterexample validator) needs `py-evm`, #10 (Python 3.14) needs upstream
+`coincurve` wheels — so this self-contained scriptability gap is the
+highest-value unblocked work.
+
+**Estimated effort:** Low-Medium. Visited-pc set in the VM + a pure-formatting
+LCOV emitter + one CLI flag.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

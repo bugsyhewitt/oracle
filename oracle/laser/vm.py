@@ -104,6 +104,11 @@ class SymbolicVM:
         # Terminal (halted, non-reverted) states collected by run(); these are
         # the hand-off points to the next transaction in a sequence.
         self.terminal_states: List[MachineState] = []
+        # Set of program counters this VM actually executed an instruction at,
+        # across every explored path. Populated in `_step`. Compared against the
+        # full disassembly to report how much of the contract the symbolic
+        # exploration reached vs. pruned (max-depth, halting opcodes, reverts).
+        self.visited_pcs: set = set()
         # symbolic transaction inputs
         # calldata is modelled as a word-indexed family of symbols: each
         # distinct CALLDATALOAD offset yields its own independent symbol so the
@@ -210,6 +215,8 @@ class SymbolicVM:
     # ------------------------------------------------------------------ #
     def _step(self, state: MachineState, inst) -> List[MachineState]:
         op = inst.mnemonic
+        # record that this instruction was reached on some explored path
+        self.visited_pcs.add(inst.pc)
         state.trace.append(TraceEntry(pc=inst.pc, op=op))
         handler = getattr(self, f"_op_{op.lower()}", None)
 

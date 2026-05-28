@@ -74,6 +74,7 @@ oracle --contract PATH
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
        [--format {json,h1md,sarif}]  # default json
+       [--coverage PATH]          # write an LCOV instruction-coverage tracefile
 ```
 
 - `--contract` — path to a `.sol` source file **or** a `.bin` EVM bytecode blob.
@@ -92,6 +93,12 @@ oracle --contract PATH
   disable the per-query limit.
 - `--format` — `json` (machine-readable), `h1md` (HackerOne-style markdown
   report), or `sarif` (SARIF v2.1.0 for GitHub code scanning / CI ingestion).
+- `--coverage` — write an [LCOV](#instruction-coverage) instruction-coverage
+  tracefile to `PATH`. This reports **how much of the contract the symbolic
+  exploration actually reached**, so a `0 findings` run can be told apart from
+  one that pruned most of the contract (depth cap, a halting opcode, reverts).
+  A one-line summary (`coverage: 136/173 instructions (78.61%) -> PATH`) is also
+  printed to stderr. Findings still go to stdout in the requested `--format`.
 
 Every finding carries:
 
@@ -332,6 +339,42 @@ decorated `@pytest.mark.slow` and are excluded from the default run.
   #   - uses: github/codeql-action/upload-sarif@v3
   #     with: { sarif_file: oracle.sarif }
   ```
+
+---
+
+## Instruction coverage
+
+A symbolic engine is only as trustworthy as the fraction of the contract it
+actually explored. A `0 findings` result is reassuring **only** if oracle
+reached the code that could contain the bug — and oracle's exploration is
+deliberately bounded: it stops a path conservatively at the `--max-depth` cap,
+at any opcode it does not model, and at every `REVERT`. A run that pruned most
+of the contract and a run that exhaustively cleared it both print "0 findings",
+and you need to be able to tell them apart.
+
+`--coverage PATH` writes an **[LCOV](https://github.com/linux-test-project/lcov)
+tracefile** — the line-coverage interchange format `genhtml`, Codecov,
+Coveralls, and GitHub coverage actions all ingest, and the same format
+Halmos v0.3.0 emits. oracle works on EVM bytecode, so each **instruction** is
+one coverage "line": the program counter maps to a 1-based line (`pc + 1`,
+matching the SARIF location convention), a reached instruction has hit count
+`1`, an unreached one `0`. A one-line summary also goes to stderr.
+
+```bash
+oracle --contract Vault.sol --input-type sol --check all \
+       --coverage oracle.info
+# stderr: coverage: 136/173 instructions (78.61%) -> oracle.info
+
+# turn the tracefile into a browsable HTML report ...
+genhtml oracle.info -o coverage-html
+# ... or upload it in CI alongside the SARIF findings.
+```
+
+Coverage honours `--max-depth` and `--sequence-depth`: raising either can only
+reach the same or more instructions. Coverage is a pure property of the
+exploration (no solver involved), so it is computed independently of and in
+addition to the normal findings output, which still goes to stdout in the
+requested `--format`.
 
 ---
 

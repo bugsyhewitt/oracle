@@ -4,6 +4,7 @@ import json
 
 from oracle import __version__
 from oracle.report import (
+    format_coverage_lcov,
     format_h1md,
     format_json,
     format_report,
@@ -213,3 +214,65 @@ def test_sarif_rule_title_for_newer_detectors():
 def test_format_report_dispatch_sarif():
     out = format_report(SAMPLE, "x.sol", "sarif")
     assert json.loads(out)["version"] == "2.1.0"
+
+
+# --------------------------------------------------------------------- #
+# LCOV instruction-coverage formatter
+# --------------------------------------------------------------------- #
+COVERAGE = {
+    "total_instructions": 4,
+    "covered_instructions": 2,
+    "coverage_pct": 50.0,
+    "covered_pcs": [0, 5],
+    "uncovered_pcs": [3, 9],
+}
+
+
+def test_lcov_header_and_footer():
+    out = format_coverage_lcov(COVERAGE, "Vault.sol")
+    lines = out.splitlines()
+    assert lines[0] == "TN:oracle"
+    assert lines[1] == "SF:Vault.sol"
+    assert "end_of_record" in lines
+    assert out.endswith("\n")
+
+
+def test_lcov_da_lines_map_pc_to_line_and_hits():
+    out = format_coverage_lcov(COVERAGE, "Vault.sol")
+    da = [l for l in out.splitlines() if l.startswith("DA:")]
+    # one DA line per instruction (covered + uncovered), sorted by pc
+    assert da == ["DA:1,1", "DA:4,0", "DA:6,1", "DA:10,0"]
+
+
+def test_lcov_summary_counts():
+    out = format_coverage_lcov(COVERAGE, "Vault.sol")
+    assert "LF:4" in out  # lines found = total instructions
+    assert "LH:2" in out  # lines hit = covered instructions
+
+
+def test_lcov_empty_contract():
+    cov = {
+        "total_instructions": 0,
+        "covered_instructions": 0,
+        "coverage_pct": 0.0,
+        "covered_pcs": [],
+        "uncovered_pcs": [],
+    }
+    out = format_coverage_lcov(cov, "Empty.sol")
+    assert "LF:0" in out
+    assert "LH:0" in out
+    assert not any(l.startswith("DA:") for l in out.splitlines())
+
+
+def test_lcov_all_covered_has_no_zero_hits():
+    cov = {
+        "total_instructions": 2,
+        "covered_instructions": 2,
+        "coverage_pct": 100.0,
+        "covered_pcs": [0, 1],
+        "uncovered_pcs": [],
+    }
+    out = format_coverage_lcov(cov, "Full.sol")
+    da = [l for l in out.splitlines() if l.startswith("DA:")]
+    assert all(l.endswith(",1") for l in da)
+    assert "LH:2" in out and "LF:2" in out

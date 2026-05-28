@@ -9,9 +9,9 @@ import os
 
 import pytest
 
-from oracle.analysis import analyze
+from oracle.analysis import analyze, compute_coverage
 from oracle.compiler import load_runtime_bytecode
-from oracle.laser.disassembler import parse_bytecode
+from oracle.laser.disassembler import Disassembly, parse_bytecode
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -76,6 +76,59 @@ def test_max_depth_prunes_deep_finding_mocked():
     deep = analyze(_bc("deep-assertion"), ["assertion"], max_depth=12)
     assert shallow == []
     assert len(deep) >= 1
+
+
+# --------------------------------------------------------------------- #
+# Instruction coverage (Z3-free: coverage is a property of exploration)
+# --------------------------------------------------------------------- #
+def test_coverage_shape():
+    cov = compute_coverage(_bc("assertion-violation"), ["assertion"], max_depth=12)
+    assert set(cov) == {
+        "total_instructions",
+        "covered_instructions",
+        "coverage_pct",
+        "covered_pcs",
+        "uncovered_pcs",
+    }
+    assert cov["total_instructions"] > 0
+    assert 0 < cov["covered_instructions"] <= cov["total_instructions"]
+    assert 0.0 < cov["coverage_pct"] <= 100.0
+
+
+def test_coverage_totals_match_disassembly():
+    bc = _bc("assertion-violation")
+    cov = compute_coverage(bc, ["assertion"], max_depth=12)
+    total = len({i.pc for i in Disassembly(bc).instructions})
+    assert cov["total_instructions"] == total
+    # covered + uncovered partitions the full instruction set exactly once
+    assert len(cov["covered_pcs"]) + len(cov["uncovered_pcs"]) == total
+    assert set(cov["covered_pcs"]).isdisjoint(cov["uncovered_pcs"])
+    assert cov["covered_instructions"] == len(cov["covered_pcs"])
+
+
+def test_coverage_pcs_are_sorted_and_real_instructions():
+    bc = _bc("reachable-selfdestruct")
+    cov = compute_coverage(bc, ["selfdestruct"], max_depth=12)
+    all_pcs = {i.pc for i in Disassembly(bc).instructions}
+    assert cov["covered_pcs"] == sorted(cov["covered_pcs"])
+    assert cov["uncovered_pcs"] == sorted(cov["uncovered_pcs"])
+    # every reported pc is an actual instruction boundary (never a PUSH operand)
+    for pc in cov["covered_pcs"] + cov["uncovered_pcs"]:
+        assert pc in all_pcs
+
+
+def test_coverage_deeper_depth_covers_at_least_as_much():
+    bc = _bc("deep-assertion")
+    shallow = compute_coverage(bc, ["assertion"], max_depth=4)
+    deep = compute_coverage(bc, ["assertion"], max_depth=12)
+    # raising the depth cap can only reach more (or equal) instructions
+    assert deep["covered_instructions"] >= shallow["covered_instructions"]
+    assert set(shallow["covered_pcs"]).issubset(deep["covered_pcs"])
+
+
+def test_coverage_unknown_check_raises():
+    with pytest.raises(ValueError):
+        compute_coverage(_bc("assertion-violation"), ["bogus"], max_depth=12)
 
 
 # --------------------------------------------------------------------- #
