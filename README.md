@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--format {json,h1md}]     # default json
@@ -162,6 +162,30 @@ storage slot is `SLOAD`ed, an external `CALL`/`CALLCODE`/`DELEGATECALL` hands
 control to a potentially re-entrant callee, and only *after* the call is that
 same slot `SSTORE`d. The correct check-effects-interactions ordering
 (`SSTORE` before the call, as in `reentrancy_safe.sol`) is **not** flagged.
+
+### `access-control` — ownership / privilege escalation
+
+```bash
+oracle --contract tests/fixtures/access-control-vuln.sol \
+       --input-type sol --check access-control --format json
+```
+
+Flags privileged operations that any address can reach because the owner/admin
+gate is absent or ineffective (`category: "access_control_escalation"`). Two
+shapes are caught:
+
+- a **re-callable initializer / unprotected ownership transfer** — a storage
+  write inside a function that read `msg.sender` but never bound a constraint on
+  it (`owner = msg.sender` with no `require`), so anyone can drive the write and
+  seize ownership. `access-control-vuln.sol`'s `initialize()` is exactly this;
+- a **privileged sink** (`SELFDESTRUCT` / `DELEGATECALL` / `CALLCODE`) reachable
+  on a path that never constrains `caller` — i.e. no ownership check at all.
+
+The discriminating signal is the absence of a `caller`-binding guard on the
+path to the sink: a genuine `require(msg.sender == owner)` shows up as a path
+constraint that references the symbolic `caller`. A contract that sets its owner
+once in the constructor and gates every privileged op behind that check
+(`access-control-safe.sol`) is **not** flagged.
 
 ### bytecode input (no solc)
 

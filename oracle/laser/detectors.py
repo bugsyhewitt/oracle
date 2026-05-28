@@ -26,6 +26,7 @@ SEVERITY = {
     "unconstrained_ether_transfer": "high",
     "arbitrary_storage_write": "high",
     "reentrancy": "high",
+    "access_control_escalation": "high",
 }
 
 
@@ -197,6 +198,132 @@ class ReentrancyDetector(DetectorHook):
         state.sloads_before_call = set(state.sloads_seen)
 
 
+class AccessControlEscalationDetector(DetectorHook):
+    """Detects ownership/privilege escalation: a privileged operation that any
+    address can reach because the owner/admin gate is absent or ineffective.
+
+    The classic shapes this catches:
+      * a re-callable initializer / unprotected `_transferOwnership` — i.e. an
+        `SSTORE` that sets a storage slot to `msg.sender` (`owner = msg.sender`)
+        with **no** `caller`-binding guard on the path, so anyone can seize
+        ownership;
+      * an `onlyOwner` guard whose owner is uninitialised (`address(0)`) or never
+        compared against `caller`, leaving the privileged sink (`SELFDESTRUCT` /
+        `DELEGATECALL`) reachable on a path that never constrains `caller`.
+
+    The discriminating signal is the **absence of an access-control guard** on
+    the path leading to the sink. In oracle's bitvec constraint model a genuine
+    `require(msg.sender == owner)` guard appears as a path constraint that
+    references the symbolic `caller`; a missing/ineffective guard leaves `caller`
+    entirely unconstrained. So:
+
+      * a sink is *guarded* iff some path constraint mentions the `caller` symbol;
+      * an SSTORE whose stored value is derived from `caller` (`owner =
+        msg.sender`) on a `caller`-unconstrained path is an escalation;
+      * a SELFDESTRUCT or DELEGATECALL on a `caller`-unconstrained path is an
+        escalation (contract destruction / takeover with no ownership check).
+
+    [Worker decision: the detector keys on the *caller* symbol appearing in the
+    path constraints rather than attempting full taint analysis on CALLER through
+    the constraint set (the effort POST_V01 #5 flags as non-trivial). Matching on
+    the caller symbol's presence is sound for the canonical patterns and avoids
+    false positives on ordinary public functions that legitimately ignore the
+    sender — those are only flagged when they additionally (a) write the sender
+    into storage as the new owner, or (b) reach SELFDESTRUCT/DELEGATECALL, both
+    of which are privileged sinks that an unauthenticated caller must never reach.
+    STORE-to-owner-of-msg.sender, SELFDESTRUCT and DELEGATECALL are the exact
+    primitives an escalation exploit needs.]
+    """
+
+    category = "access_control_escalation"
+
+    # privileged sinks an unauthenticated caller must never reach
+    _PRIV_CALL_OPS = ("DELEGATECALL", "CALLCODE")
+
+    def inspect(self, vm, state, instruction) -> None:
+        op = instruction.mnemonic
+        if op == "SSTORE":
+            # owner = msg.sender pattern: a storage write inside a function that
+            # *read* msg.sender (CALLER executed on this path) yet never bound a
+            # constraint on it => the sender is observed but not enforced, so any
+            # address can drive the write (re-callable initializer / unprotected
+            # _transferOwnership). Anyone can become owner.
+            #
+            # [Worker decision: the signal is `caller_loaded AND not guarded`
+            # rather than "the SSTORE value is taint-derived from CALLER".
+            # Solidity's address packing (SLOAD ; mask ; OR-in caller ; SSTORE)
+            # routes the caller through EXP/MUL/OR arithmetic that oracle models
+            # coarsely (EXP is approximated, packed memory roundtrips through the
+            # coarse memory model), so the caller term does not reliably survive
+            # onto the SSTORE operand. "The function read the sender but did not
+            # gate on it, and then writes storage" is the sound, model-robust
+            # statement of the same bug — and the value/key operands are still
+            # checked as a stronger corroborating signal when they do survive.]
+            if len(state.stack) < 2:
+                return
+            if _guarded_by_caller(state, vm):
+                return
+            key = state.stack[-1]
+            value = state.stack[-2]
+            caller_derived = _mentions_caller(value, vm) or _mentions_caller(key, vm)
+            if state.caller_loaded or caller_derived:
+                self.findings.append(_finding(self.category, state, instruction, vm))
+            return
+        if op == "SELFDESTRUCT" or op in self._PRIV_CALL_OPS:
+            # destroying or hijacking the contract with no ownership check.
+            if not _guarded_by_caller(state, vm):
+                self.findings.append(_finding(self.category, state, instruction, vm))
+
+
+def _caller_symbol_name(vm) -> str:
+    """The z3 leaf name of this transaction's symbolic msg.sender."""
+    raw = vm.caller.raw if hasattr(vm.caller, "raw") else vm.caller
+    try:
+        return raw.decl().name()
+    except Exception:
+        return "caller"
+
+
+def _ast_mentions(node, target_name: str) -> bool:
+    """True if the z3 AST rooted at `node` contains a leaf named `target_name`."""
+    try:
+        import z3
+    except Exception:
+        return False
+    raw = node.raw if hasattr(node, "raw") else node
+    if not isinstance(raw, z3.AstRef):
+        return False
+    stack = [raw]
+    seen = set()
+    while stack:
+        cur = stack.pop()
+        key = cur.get_id() if hasattr(cur, "get_id") else id(cur)
+        if key in seen:
+            continue
+        seen.add(key)
+        if isinstance(cur, z3.ExprRef):
+            try:
+                if cur.num_args() == 0 and cur.decl().name() == target_name:
+                    return True
+            except Exception:
+                pass
+            for i in range(cur.num_args()):
+                stack.append(cur.arg(i))
+    return False
+
+
+def _mentions_caller(bv, vm) -> bool:
+    """True if the bitvec value is derived from the symbolic msg.sender."""
+    return _ast_mentions(bv, _caller_symbol_name(vm))
+
+
+def _guarded_by_caller(state, vm) -> bool:
+    """True if any path constraint references msg.sender — i.e. control flow has
+    branched on the caller's identity (an access-control guard is present)."""
+    name = _caller_symbol_name(vm)
+    return any(_ast_mentions(c, name) for c in state.constraints)
+
+
 def _slot_key(bv) -> str:
     """A stable identity for a storage slot key (concrete or symbolic)."""
     raw = bv.raw if hasattr(bv, "raw") else bv
@@ -252,4 +379,5 @@ DETECTOR_REGISTRY = {
     "ether-leak": EtherLeakDetector,
     "storage-write": StorageWriteDetector,
     "reentrancy": ReentrancyDetector,
+    "access-control": AccessControlEscalationDetector,
 }

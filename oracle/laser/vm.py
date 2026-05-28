@@ -520,6 +520,10 @@ class SymbolicVM:
         return [state]
 
     def _op_caller(self, state, inst):
+        # record that this path read msg.sender (consumed by the access-control
+        # escalation detector to tell "function looked at the sender" apart from
+        # functions that never touch it).
+        state.caller_loaded = True
         state.push(self.caller)
         state.pc = inst.pc + 1
         return [state]
