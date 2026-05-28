@@ -306,8 +306,12 @@ decorated `@pytest.mark.slow` and are excluded from the default run.
 
 - **`json`** — `{ tool, contract, finding_count, findings: [...] }`. Each
   finding has `category`, `severity`, `pc`, `op`, `trace`, `trigger_input`.
-- **`h1md`** — a HackerOne-style markdown report, one section per finding, with
-  the trigger input and the execution trace.
+- **`h1md`** — a HackerOne-style markdown report. It opens with a `## Summary`
+  block — a severity banding line (`**Severity:** 2 High, 1 Medium`, highest
+  band first, zero bands omitted) and a jump table (`# / Severity / Finding /
+  Opcode / pc`) so a triage reader gets the executive view before the detail —
+  followed by one section per finding with the trigger input and the execution
+  trace.
 
 ---
 
