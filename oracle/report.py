@@ -50,6 +50,16 @@ def format_h1md(findings: List[dict], contract: str) -> str:
         lines.append(f"**Severity:** {sev}")
         lines.append(f"**Category:** `{f['category']}`")
         lines.append(f"**Vulnerable opcode:** `{f['op']}` at pc `{f['pc']}`")
+        confidence = f.get("confidence")
+        if confidence == "timeout":
+            lines.append(
+                "**Confidence:** `timeout` — the solver query exceeded the "
+                "per-query timeout; reachability is undecided and no trigger "
+                "input could be produced. Re-run with a larger `--timeout` to "
+                "confirm or dismiss."
+            )
+        elif confidence:
+            lines.append(f"**Confidence:** `{confidence}`")
         lines.append("")
         lines.append("### Trigger input")
         lines.append("")
