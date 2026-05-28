@@ -339,6 +339,43 @@ LCOV emitter + one CLI flag.
 
 ---
 
+### 13. `--fail-on SEVERITY` CI exit-code gate ✅ IMPLEMENTED (Phase 2, Rotation 12)
+
+**Status:** Shipped. Added a `--fail-on {none,low,medium,high}` CLI flag
+(default `none`). After a successful analysis the CLI now returns exit code `1`
+when any finding's severity is at or above the requested band (`low < medium <
+high`); `none` never gates, preserving oracle's historical "exit 0 on a
+successful run" behaviour. The gate decision is a pure, Z3-free helper
+(`cli._gate_triggered`) ranking severities and ignoring unrecognised bands
+(treated as the weakest, so a non-standard severity never fails a build). Exit
+codes are now a documented contract: `0` clean/below-threshold, `1` gated
+finding, `2` usage/IO error, `3` analysis crash — so a pipeline can fail on
+findings without masking a broken invocation. A one-line `fail-on: N finding(s)
+at or above severity 'band' -> exit 1` notice goes to stderr; findings still
+print to stdout in the requested `--format`. The JSON/finding format is
+unchanged. Tests: 13 new cases in `tests/test_cli.py` (flag default/parse,
+reject unknown band, help listing, six `_gate_triggered` unit cases covering
+none/empty/at-or-above/below-threshold/highest-finding/unknown-severity, and
+three end-to-end `main()` cases: gate-on-medium -> 1, gate-on-high-above-findings
+-> 0, default -> 0 with findings). README gains an "Exit codes" table and a
+`--fail-on` flag description.
+
+**Why it matters:** Rotations 10 (SARIF) and 11 (LCOV) made oracle's output CI-
+ingestible, but a CI step can only *act* on results if the tool's exit code
+reflects them — every comparable scanner exposes this (mythril `--exitcode`,
+semgrep, trivy). Without it, an oracle run in CI uploads its SARIF/coverage but
+always reports success, so a reachable High-severity bug never fails the build.
+`--fail-on` closes that loop and completes the scriptability story those two
+rotations began. Selected for Rotation 12 because the two remaining *numbered*
+roadmap items are still blocked: #7 (counterexample validator) needs `py-evm`,
+#10 (Python 3.14) needs upstream `coincurve` 3.14 wheels — so this self-
+contained CI-integration gap is the highest-value unblocked work.
+
+**Estimated effort:** Low. One CLI flag, a small pure gate helper, one return
+path, and docs.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

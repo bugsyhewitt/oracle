@@ -75,6 +75,7 @@ oracle --contract PATH
        [--timeout SECONDS]        # default 30 (0 = no limit)
        [--format {json,h1md,sarif}]  # default json
        [--coverage PATH]          # write an LCOV instruction-coverage tracefile
+       [--fail-on {none,low,medium,high}]  # default none (CI exit-code gate)
 ```
 
 - `--contract` — path to a `.sol` source file **or** a `.bin` EVM bytecode blob.
@@ -99,6 +100,12 @@ oracle --contract PATH
   one that pruned most of the contract (depth cap, a halting opcode, reverts).
   A one-line summary (`coverage: 136/173 instructions (78.61%) -> PATH`) is also
   printed to stderr. Findings still go to stdout in the requested `--format`.
+- `--fail-on` — make oracle a **CI build gate**. With `--fail-on {low,medium,high}`
+  the process exits `1` if any finding's severity is at or above the given band
+  (`low < medium < high`); otherwise it exits `0`. The default `none` never
+  gates, preserving the historical "exit 0 on a successful run" behaviour.
+  Findings are still written to stdout regardless. See
+  [Exit codes](#exit-codes).
 
 Every finding carries:
 
@@ -375,6 +382,35 @@ reach the same or more instructions. Coverage is a pure property of the
 exploration (no solver involved), so it is computed independently of and in
 addition to the normal findings output, which still goes to stdout in the
 requested `--format`.
+
+---
+
+## Exit codes
+
+oracle is built to be scripted, so its exit codes are stable and a build can
+gate on them:
+
+| Code | Meaning |
+|---|---|
+| `0` | Analysis completed. Either no findings, or findings below the `--fail-on` band (or `--fail-on none`, the default). |
+| `1` | Analysis completed **and** at least one finding met the `--fail-on` severity threshold. |
+| `2` | Usage / IO error — bad arguments, missing contract file, or an unwritable `--coverage` path. |
+| `3` | Analysis crashed (an unexpected error inside the engine). |
+
+By default (`--fail-on none`) a successful run always exits `0`, even with
+findings — the historical behaviour. Add `--fail-on {low,medium,high}` to make
+oracle fail the build when a finding's severity is at or above the chosen band
+(`low < medium < high`). Because a gated failure (`1`) is distinct from a tool
+error (`2`/`3`), a pipeline can fail the build on findings without masking a
+broken invocation:
+
+```bash
+# fail the job only when a High-severity bug is reachable;
+# still upload the SARIF + coverage artifacts either way.
+oracle --contract Vault.sol --input-type sol --check all \
+       --format sarif --fail-on high > oracle.sarif
+# stderr (on a hit): fail-on: 2 finding(s) at or above severity 'high' -> exit 1
+```
 
 ---
 

@@ -18,6 +18,34 @@ CHECK_CHOICES = list(DETECTOR_REGISTRY.keys()) + ["all"]
 INPUT_CHOICES = ["sol", "bytecode"]
 FORMAT_CHOICES = ["json", "h1md", "sarif"]
 
+# --fail-on severity gate. Ordered weakest-to-strongest; a finding "meets" a
+# threshold when its severity is at or above the requested band. "none" (the
+# default) never gates, preserving oracle's historical "exit 0 on a successful
+# run" behaviour. Exit code 1 is reserved for "analysis succeeded AND a finding
+# met the --fail-on threshold" so CI can distinguish a gated failure (1) from a
+# tool/usage error (2) or an analysis crash (3).
+FAIL_ON_CHOICES = ["none", "low", "medium", "high"]
+_SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3}
+GATE_EXIT_CODE = 1
+
+
+def _gate_triggered(findings: List[dict], fail_on: str) -> bool:
+    """True if any finding's severity meets or exceeds the --fail-on threshold.
+
+    `fail_on == "none"` never triggers. Unknown / unranked severities are
+    treated as the weakest band (rank 0) so a non-standard severity only gates
+    when `--fail-on` itself is the weakest meaningful band would still not catch
+    it — i.e. it is conservative and never fails a build on an unrecognised band.
+    """
+    if fail_on == "none":
+        return False
+    threshold = _SEVERITY_RANK.get(fail_on, 0)
+    for f in findings:
+        sev = str(f.get("severity", "")).lower()
+        if _SEVERITY_RANK.get(sev, 0) >= threshold:
+            return True
+    return False
+
 ETHICAL_USE = (
     "oracle is for authorized security testing and bug-bounty research only. "
     "Analyse contracts you own or are explicitly permitted to assess."
@@ -99,6 +127,19 @@ def build_parser() -> argparse.ArgumentParser:
             "contract the symbolic exploration reached vs. pruned, so a "
             "'0 findings' run can be distinguished from an under-explored one. "
             "A one-line coverage summary is also printed to stderr."
+        ),
+    )
+    parser.add_argument(
+        "--fail-on",
+        choices=FAIL_ON_CHOICES,
+        default="none",
+        metavar="SEVERITY",
+        help=(
+            "exit with code 1 if any finding's severity is at or above this "
+            "band (low < medium < high), so a CI step can gate a build on "
+            "oracle's results. Default 'none' always exits 0 on a successful "
+            "run. Exit 2 is a usage/IO error and 3 an analysis crash, so a "
+            "pipeline can tell a gated failure apart from a tool error."
         ),
     )
     parser.add_argument(
@@ -196,6 +237,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     sys.stdout.write(output)
     if not output.endswith("\n"):
         sys.stdout.write("\n")
+
+    if _gate_triggered(findings, args.fail_on):
+        sys.stderr.write(
+            "fail-on: {n} finding(s) at or above severity '{band}' -> "
+            "exit {code}\n".format(
+                n=len(findings), band=args.fail_on, code=GATE_EXIT_CODE
+            )
+        )
+        return GATE_EXIT_CODE
     return 0
 
 
