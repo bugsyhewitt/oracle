@@ -16,7 +16,7 @@ from oracle.laser.detectors import DETECTOR_REGISTRY
 # on the CLI automatically (no second source of truth to keep in sync).
 CHECK_CHOICES = list(DETECTOR_REGISTRY.keys()) + ["all"]
 INPUT_CHOICES = ["sol", "bytecode"]
-FORMAT_CHOICES = ["json", "h1md"]
+FORMAT_CHOICES = ["json", "h1md", "sarif"]
 
 ETHICAL_USE = (
     "oracle is for authorized security testing and bug-bounty research only. "
@@ -84,7 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--format",
         choices=FORMAT_CHOICES,
         default="json",
-        help="output format: json or HackerOne-style markdown (default: json)",
+        help=(
+            "output format: json, HackerOne-style markdown (h1md), or SARIF "
+            "v2.1.0 for GitHub code scanning / CI ingestion (default: json)"
+        ),
     )
     parser.add_argument(
         "--contract-name",

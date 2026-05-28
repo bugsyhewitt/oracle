@@ -2,7 +2,13 @@
 
 import json
 
-from oracle.report import format_h1md, format_json, format_report
+from oracle import __version__
+from oracle.report import (
+    format_h1md,
+    format_json,
+    format_report,
+    format_sarif,
+)
 
 SAMPLE = [
     {
@@ -99,3 +105,111 @@ def test_h1md_summary_omits_zero_bands():
 def test_h1md_empty_has_no_summary_block():
     out = format_h1md([], "x.sol")
     assert "## Summary" not in out
+
+
+# ---------------------------------------------------------------------- #
+# SARIF v2.1.0 formatter
+# ---------------------------------------------------------------------- #
+def test_sarif_top_level_shape():
+    out = format_sarif(SAMPLE, "x.sol")
+    data = json.loads(out)
+    assert data["version"] == "2.1.0"
+    assert data["$schema"].endswith("sarif-schema-2.1.0.json")
+    assert len(data["runs"]) == 1
+    driver = data["runs"][0]["tool"]["driver"]
+    assert driver["name"] == "oracle"
+    assert driver["version"] == __version__
+
+
+def test_sarif_one_result_per_finding():
+    data = json.loads(format_sarif(MULTI, "x.sol"))
+    results = data["runs"][0]["results"]
+    assert len(results) == len(MULTI)
+    rule_ids = [r["ruleId"] for r in results]
+    assert rule_ids == [
+        "reachable_selfdestruct",
+        "arbitrary_storage_write",
+        "integer_overflow",
+    ]
+
+
+def test_sarif_rules_are_deduplicated_per_category():
+    dup = MULTI + [dict(MULTI[0])]  # second reachable_selfdestruct finding
+    data = json.loads(format_sarif(dup, "x.sol"))
+    rules = data["runs"][0]["tool"]["driver"]["rules"]
+    rule_ids = [r["id"] for r in rules]
+    # four findings but only three distinct categories => three rules
+    assert sorted(rule_ids) == [
+        "arbitrary_storage_write",
+        "integer_overflow",
+        "reachable_selfdestruct",
+    ]
+    # ...while every finding still produces its own result row
+    assert len(data["runs"][0]["results"]) == 4
+
+
+def test_sarif_level_maps_severity():
+    data = json.loads(format_sarif(MULTI, "x.sol"))
+    by_rule = {r["ruleId"]: r for r in data["runs"][0]["results"]}
+    # high -> error, medium -> error (both are real reachable bugs)
+    assert by_rule["reachable_selfdestruct"]["level"] == "error"
+    assert by_rule["integer_overflow"]["level"] == "error"
+
+
+def test_sarif_security_severity_property():
+    data = json.loads(format_sarif(MULTI, "x.sol"))
+    rules = {r["id"]: r for r in data["runs"][0]["tool"]["driver"]["rules"]}
+    assert rules["reachable_selfdestruct"]["properties"]["security-severity"] == "8.0"
+    assert rules["integer_overflow"]["properties"]["security-severity"] == "5.0"
+
+
+def test_sarif_location_uses_contract_uri_and_pc_line():
+    data = json.loads(format_sarif(SAMPLE, "contracts/Vault.sol"))
+    loc = data["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert loc["artifactLocation"]["uri"] == "contracts/Vault.sol"
+    # pc 74 -> 1-based startLine 75
+    assert loc["region"]["startLine"] == 75
+
+
+def test_sarif_result_properties_carry_pc_and_opcode():
+    data = json.loads(format_sarif(SAMPLE, "x.sol"))
+    props = data["runs"][0]["results"][0]["properties"]
+    assert props["pc"] == 74
+    assert props["opcode"] == "INVALID"
+    assert props["trigger_input"] == {"calldata": "0x" + "00" * 32}
+
+
+def test_sarif_confidence_surfaces_when_present():
+    finding = dict(SAMPLE[0])
+    finding["confidence"] = "timeout"
+    data = json.loads(format_sarif([finding], "x.sol"))
+    result = data["runs"][0]["results"][0]
+    assert result["properties"]["confidence"] == "timeout"
+    assert "Confidence: timeout" in result["message"]["text"]
+
+
+def test_sarif_empty_is_valid_run_with_no_results():
+    data = json.loads(format_sarif([], "x.sol"))
+    run = data["runs"][0]
+    assert run["results"] == []
+    assert run["tool"]["driver"]["rules"] == []
+
+
+def test_sarif_rule_title_for_newer_detectors():
+    finding = {
+        "category": "reentrancy",
+        "severity": "high",
+        "pc": 5,
+        "op": "CALL",
+        "trace": [],
+        "trigger_input": {},
+    }
+    data = json.loads(format_sarif([finding], "x.sol"))
+    rule = data["runs"][0]["tool"]["driver"]["rules"][0]
+    assert rule["id"] == "reentrancy"
+    assert "Reentrancy" in rule["shortDescription"]["text"]
+
+
+def test_format_report_dispatch_sarif():
+    out = format_report(SAMPLE, "x.sol", "sarif")
+    assert json.loads(out)["version"] == "2.1.0"

@@ -81,6 +81,14 @@ def test_format_choices():
     assert ns.format == "h1md"
 
 
+def test_format_choice_sarif():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["--contract", "x.bin", "--input-type", "bytecode", "--format", "sarif"]
+    )
+    assert ns.format == "sarif"
+
+
 def test_input_type_required():
     parser = build_parser()
     with pytest.raises(SystemExit):
