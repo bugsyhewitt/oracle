@@ -69,12 +69,41 @@ class DetectorHook:
 
 
 class SymbolicVM:
-    """Bounded symbolic executor over a single contract's runtime bytecode."""
+    """Bounded symbolic executor over a single contract's runtime bytecode.
 
-    def __init__(self, bytecode: bytes, max_depth: int = 12):
+    A single `SymbolicVM` instance models exactly ONE transaction. Multi-
+    transaction (stateful) exploration is composed by the analysis driver,
+    which chains several VMs: the terminal `WorldState` snapshots of one
+    transaction become the initial worlds of the next. Each transaction gets a
+    distinct `epoch` tag that prefixes every symbol the VM mints, so the same
+    PC executing in two different transactions yields *independent* symbolic
+    inputs (calldata, caller, callvalue, memory reads, call return values, …)
+    rather than being conflated into one shared symbol.
+    """
+
+    def __init__(
+        self,
+        bytecode: bytes,
+        max_depth: int = 12,
+        epoch: str = "",
+        initial_world: Optional[WorldState] = None,
+        seed_constraints: Optional[List] = None,
+    ):
         self.disasm = Disassembly(bytecode)
         self.max_depth = max_depth
         self.detectors: List[DetectorHook] = []
+        # Per-transaction symbol namespace. Empty for the first (or only)
+        # transaction so the v0.1 trigger-input names ("calldata", "caller",
+        # "callvalue") are unchanged; later transactions use "txN_" prefixes.
+        self.epoch = epoch
+        # The storage state this transaction starts from. For tx1 this is a
+        # fresh all-zero world; for tx2+ it is a terminal snapshot of tx1.
+        self.initial_world = initial_world
+        # Path constraints inherited from prior transactions in the sequence.
+        self.seed_constraints = list(seed_constraints) if seed_constraints else []
+        # Terminal (halted, non-reverted) states collected by run(); these are
+        # the hand-off points to the next transaction in a sequence.
+        self.terminal_states: List[MachineState] = []
         # symbolic transaction inputs
         # calldata is modelled as a word-indexed family of symbols: each
         # distinct CALLDATALOAD offset yields its own independent symbol so the
@@ -83,12 +112,20 @@ class SymbolicVM:
         # reported as the principal trigger input.
         self._calldata_words = {}
         self.calldata = self._calldata_word(0)
-        self.callvalue = symbol_factory.BitVecSym("callvalue", 256)
-        self.caller = symbol_factory.BitVecSym("caller", 256)
-        self.calldatasize = symbol_factory.BitVecSym("calldatasize", 256)
+        self.callvalue = symbol_factory.BitVecSym(self._sym("callvalue"), 256)
+        self.caller = symbol_factory.BitVecSym(self._sym("caller"), 256)
+        self.calldatasize = symbol_factory.BitVecSym(self._sym("calldatasize"), 256)
         self.work_count = 0
         # bound on total worklist iterations to guarantee termination
         self.max_work = 200000
+
+    def _sym(self, name: str) -> str:
+        """Namespace a symbol name with this transaction's epoch prefix.
+
+        The first transaction (epoch == "") keeps bare names so existing
+        single-transaction trigger-input reporting is byte-for-byte unchanged.
+        """
+        return f"{self.epoch}{name}" if self.epoch else name
 
     def _calldata_word(self, offset) -> BitVec:
         """Return the symbolic 256-bit word at a calldata offset.
@@ -98,30 +135,49 @@ class SymbolicVM:
         """
         key = self._concrete(offset) if not isinstance(offset, int) else offset
         if key is None:
-            return symbol_factory.BitVecSym("calldata_dyn", 256)
+            return symbol_factory.BitVecSym(self._sym("calldata_dyn"), 256)
         if key not in self._calldata_words:
             name = "calldata" if key == 0 else f"calldata_{key}"
-            self._calldata_words[key] = symbol_factory.BitVecSym(name, 256)
+            self._calldata_words[key] = symbol_factory.BitVecSym(self._sym(name), 256)
         return self._calldata_words[key]
 
     def register(self, detector: DetectorHook) -> None:
         self.detectors.append(detector)
 
     def run(self) -> None:
-        """Depth-first exploration of all paths up to max_depth."""
-        world = WorldState()
-        start = MachineState(world)
+        """Depth-first exploration of all paths up to max_depth.
+
+        Records every terminal (halted, non-reverted) path end in
+        `self.terminal_states` so a multi-transaction driver can resume from
+        each resulting world state.
+        """
+        if self.initial_world is not None:
+            # resume from a prior transaction's storage; carry it copy-on-write
+            # so this transaction's SSTOREs don't mutate the source snapshot.
+            world = WorldState()
+            world.storage = self.initial_world.storage
+            start = MachineState(world)
+            start.fork_world()
+        else:
+            world = WorldState()
+            start = MachineState(world)
+        # inherit the path constraints accumulated by earlier transactions
+        start.constraints = list(self.seed_constraints)
         worklist: List[MachineState] = [start]
         while worklist:
             self.work_count += 1
             if self.work_count > self.max_work:
                 break
             state = worklist.pop()
-            if state.halted or state.reverted:
+            if state.reverted:
+                continue
+            if state.halted:
+                self.terminal_states.append(state)
                 continue
             inst = self.disasm.by_pc.get(state.pc)
             if inst is None:
-                # ran off the end of code => implicit STOP
+                # ran off the end of code => implicit STOP (a terminal state)
+                self.terminal_states.append(state)
                 continue
 
             # detector hook BEFORE executing the instruction
@@ -132,8 +188,21 @@ class SymbolicVM:
                 successors = self._step(state, inst)
             except (StackUnderflowError, StackOverflowError):
                 continue
+            # A handler that halts cleanly (STOP / RETURN / implicit end) mutates
+            # `state` in place and returns no successors; such a state is a valid
+            # terminal world to resume a later transaction from. A reverted state
+            # is discarded (its storage effects are rolled back on the EVM).
+            if not successors:
+                if state.halted and not state.reverted:
+                    self.terminal_states.append(state)
+                continue
             for succ in successors:
-                if succ.depth <= self.max_depth and not succ.halted and not succ.reverted:
+                if succ.reverted:
+                    continue
+                if succ.halted:
+                    self.terminal_states.append(succ)
+                    continue
+                if succ.depth <= self.max_depth:
                     worklist.append(succ)
 
     # ------------------------------------------------------------------ #
@@ -456,33 +525,33 @@ class SymbolicVM:
         return [state]
 
     def _op_address(self, state, inst):
-        state.push(symbol_factory.BitVecSym("address_this", 256))
+        state.push(symbol_factory.BitVecSym(self._sym("address_this"), 256))
         state.pc = inst.pc + 1
         return [state]
 
     def _op_origin(self, state, inst):
-        state.push(symbol_factory.BitVecSym("origin", 256))
+        state.push(symbol_factory.BitVecSym(self._sym("origin"), 256))
         state.pc = inst.pc + 1
         return [state]
 
     def _op_balance(self, state, inst):
         state.pop()
-        state.push(symbol_factory.BitVecSym("balance", 256))
+        state.push(symbol_factory.BitVecSym(self._sym("balance"), 256))
         state.pc = inst.pc + 1
         return [state]
 
     def _op_selfbalance(self, state, inst):
-        state.push(symbol_factory.BitVecSym("selfbalance", 256))
+        state.push(symbol_factory.BitVecSym(self._sym("selfbalance"), 256))
         state.pc = inst.pc + 1
         return [state]
 
     def _op_timestamp(self, state, inst):
-        state.push(symbol_factory.BitVecSym("timestamp", 256))
+        state.push(symbol_factory.BitVecSym(self._sym("timestamp"), 256))
         state.pc = inst.pc + 1
         return [state]
 
     def _generic_env(self, state, inst, name):
-        state.push(symbol_factory.BitVecSym(name, 256))
+        state.push(symbol_factory.BitVecSym(self._sym(name), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -505,7 +574,7 @@ class SymbolicVM:
         # Size of the return data from the most recent external call. Unknown
         # statically, so a fresh symbolic word (conservative-sound): the path
         # continues rather than halting.
-        state.push(symbol_factory.BitVecSym(f"returndatasize_{inst.pc}", 256))
+        state.push(symbol_factory.BitVecSym(self._sym(f"returndatasize_{inst.pc}"), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -523,7 +592,7 @@ class SymbolicVM:
         # EXTCODESIZE addr — code size of an external account. Fresh symbol so
         # access-control guards like `extcodesize(x) == 0` stay explorable.
         state.pop()  # address
-        state.push(symbol_factory.BitVecSym(f"extcodesize_{inst.pc}", 256))
+        state.push(symbol_factory.BitVecSym(self._sym(f"extcodesize_{inst.pc}"), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -540,7 +609,7 @@ class SymbolicVM:
     def _op_extcodehash(self, state, inst):
         # EXTCODEHASH addr — keccak of external account code. Fresh symbol.
         state.pop()  # address
-        state.push(symbol_factory.BitVecSym(f"extcodehash_{inst.pc}", 256))
+        state.push(symbol_factory.BitVecSym(self._sym(f"extcodehash_{inst.pc}"), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -571,7 +640,7 @@ class SymbolicVM:
     # ---- memory ----
     def _op_mload(self, state, inst):
         state.pop()  # offset; memory modelled coarsely
-        state.push(symbol_factory.BitVecSym(f"mem_{inst.pc}", 256))
+        state.push(symbol_factory.BitVecSym(self._sym(f"mem_{inst.pc}"), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -613,22 +682,22 @@ class SymbolicVM:
             # Single 256-bit word: create a symbolic memory read at the offset
             # or generate a fresh word symbol when the offset is also symbolic.
             if offset_c is not None:
-                word = symbol_factory.BitVecSym(f"mem_sha3_{offset_c}", 256)
+                word = symbol_factory.BitVecSym(self._sym(f"mem_sha3_{offset_c}"), 256)
             else:
-                word = symbol_factory.BitVecSym(f"mem_sha3_{inst.pc}_w", 256)
+                word = symbol_factory.BitVecSym(self._sym(f"mem_sha3_{inst.pc}_w"), 256)
             result = keccak_model.hash_256(word)
         elif size_c == 64:
             # Two 256-bit words (e.g. keccak256(abi.encode(key, slot))).
             if offset_c is not None:
-                hi = symbol_factory.BitVecSym(f"mem_sha3_{offset_c}_hi", 256)
-                lo = symbol_factory.BitVecSym(f"mem_sha3_{offset_c + 32}_lo", 256)
+                hi = symbol_factory.BitVecSym(self._sym(f"mem_sha3_{offset_c}_hi"), 256)
+                lo = symbol_factory.BitVecSym(self._sym(f"mem_sha3_{offset_c + 32}_lo"), 256)
             else:
-                hi = symbol_factory.BitVecSym(f"mem_sha3_{inst.pc}_hi", 256)
-                lo = symbol_factory.BitVecSym(f"mem_sha3_{inst.pc}_lo", 256)
+                hi = symbol_factory.BitVecSym(self._sym(f"mem_sha3_{inst.pc}_hi"), 256)
+                lo = symbol_factory.BitVecSym(self._sym(f"mem_sha3_{inst.pc}_lo"), 256)
             result = keccak_model.hash_512(hi, lo)
         else:
             # Unknown / variable size — conservative fresh symbol (sound).
-            result = symbol_factory.BitVecSym(f"sha3_{inst.pc}", 256)
+            result = symbol_factory.BitVecSym(self._sym(f"sha3_{inst.pc}"), 256)
 
         state.push(result)
         state.pc = inst.pc + 1
@@ -716,7 +785,7 @@ class SymbolicVM:
         for _ in range(7):
             if state.stack:
                 state.pop()
-        state.push(symbol_factory.BitVecSym(f"callretval_{inst.pc}", 256))
+        state.push(symbol_factory.BitVecSym(self._sym(f"callretval_{inst.pc}"), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -724,7 +793,7 @@ class SymbolicVM:
         for _ in range(6):
             if state.stack:
                 state.pop()
-        state.push(symbol_factory.BitVecSym(f"staticretval_{inst.pc}", 256))
+        state.push(symbol_factory.BitVecSym(self._sym(f"staticretval_{inst.pc}"), 256))
         state.pc = inst.pc + 1
         return [state]
 

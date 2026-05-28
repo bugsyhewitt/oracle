@@ -71,6 +71,7 @@ oracle --contract PATH
        --input-type {sol,bytecode}
        [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,all}]
        [--max-depth N]            # default 12
+       [--sequence-depth N]       # default 1
        [--format {json,h1md}]     # default json
 ```
 
@@ -79,6 +80,9 @@ oracle --contract PATH
 - `--check` — which vulnerability class to look for (`all` runs every detector).
 - `--max-depth` — maximum symbolic branch depth to explore (default `12`).
   Deeper bugs need a higher depth; shallow depths prune long paths.
+- `--sequence-depth` — number of transactions to sequence for **stateful**
+  exploration (default `1` = single-transaction analysis). See
+  [Multi-transaction exploration](#multi-transaction-stateful-exploration).
 - `--format` — `json` (machine-readable) or `h1md` (HackerOne-style markdown report).
 
 Every finding carries:
@@ -176,6 +180,47 @@ oracle --contract tests/fixtures/deep-assertion.sol \
 oracle --contract tests/fixtures/deep-assertion.sol \
        --input-type sol --check assertion --max-depth 12   # 1 finding
 ```
+
+---
+
+## Multi-transaction (stateful) exploration
+
+oracle v0.1 models a **single** transaction starting from fresh, all-zero
+storage. Some vulnerabilities are only reachable *after* an earlier transaction
+has mutated persistent storage — a guard like `require(initialized)` where the
+flag is set by a separate `init()` call, an access-control escalation that needs
+`init()` then `admin()`, or a price-manipulation path that needs a setup deposit
+before the trigger. A single transaction from zero storage can never satisfy
+those guards, so the bug stays invisible.
+
+`--sequence-depth N` chains up to **N** symbolic transactions. Each later
+transaction **resumes from a terminal storage state** of the previous one, with
+a fresh, independent set of symbolic inputs (`calldata`, `caller`, `callvalue`,
+…), and the path constraints of every transaction in the sequence are composed
+before Z3 decides reachability. Transactions after the first use a `txN_`-prefixed
+symbol namespace so they are never conflated with earlier ones.
+
+```bash
+# guarded SELFDESTRUCT: arm() must run before blow() can self-destruct.
+# single transaction from fresh storage -> nothing found:
+oracle --contract tests/fixtures/stateful-selfdestruct.sol \
+       --input-type sol --check selfdestruct --sequence-depth 1   # 0 findings
+
+# two-transaction sequence (arm() then blow()) -> the bug is reachable:
+oracle --contract tests/fixtures/stateful-selfdestruct.sol \
+       --input-type sol --check selfdestruct --sequence-depth 2   # 1 finding
+```
+
+Notes and bounds:
+
+- **Combinatorial cost.** Each transaction re-explores from every terminal
+  world of the prior one. The fan-out of carried-forward worlds is capped
+  (`MAX_SEQUENCE_FANOUT`) so a deep sequence stays bounded; raise `--max-depth`
+  if a per-transaction path is being pruned before it completes.
+- **`--sequence-depth 1` is exactly the v0.1 behaviour** — same trigger-input
+  symbol names, same findings. The flag is purely additive.
+- The reported `trigger_input` reflects the **final (triggering) transaction**
+  in the sequence; the trace shows the ops of that transaction.
 
 ---
 

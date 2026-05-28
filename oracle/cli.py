@@ -58,6 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum symbolic path/branch depth to explore (default: 12)",
     )
     parser.add_argument(
+        "--sequence-depth",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "number of transactions to sequence for stateful exploration "
+            "(default: 1 = single-transaction analysis). N>1 chains symbolic "
+            "transactions, resuming each from the previous one's storage to "
+            "find bugs that need setup+trigger across separate calls."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=FORMAT_CHOICES,
         default="json",
@@ -107,8 +119,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     from oracle.analysis import analyze
     from oracle.report import format_report
 
+    if args.sequence_depth < 1:
+        sys.stderr.write("error: --sequence-depth must be >= 1\n")
+        return 2
+
     try:
-        findings = analyze(bytecode, checks, max_depth=args.max_depth)
+        findings = analyze(
+            bytecode,
+            checks,
+            max_depth=args.max_depth,
+            sequence_depth=args.sequence_depth,
+        )
     except Exception as exc:
         sys.stderr.write(f"error: analysis failed: {exc}\n")
         return 3
