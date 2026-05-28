@@ -35,6 +35,44 @@ def test_max_depth_defaults_to_12():
     assert ns.max_depth == 12
 
 
+def test_sequence_depth_defaults_to_one():
+    parser = build_parser()
+    ns = parser.parse_args(["--contract", "x.bin", "--input-type", "bytecode"])
+    assert ns.sequence_depth == 1
+
+
+def test_sequence_depth_is_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["--contract", "x.bin", "--input-type", "bytecode", "--sequence-depth", "3"]
+    )
+    assert ns.sequence_depth == 3
+
+
+def test_help_lists_sequence_depth(capsys):
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--sequence-depth" in out
+
+
+def test_sequence_depth_below_one_exits_2(capsys):
+    rc = main(
+        [
+            "--contract",
+            os.path.join(FIXTURES, "assertion-violation.sol"),
+            "--input-type",
+            "sol",
+            "--check",
+            "assertion",
+            "--sequence-depth",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
 def test_format_choices():
     parser = build_parser()
     ns = parser.parse_args(
