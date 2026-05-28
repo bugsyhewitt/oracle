@@ -51,6 +51,12 @@ class MachineState:
         self.sloads_seen: Set[str] = set()
         self.call_checkpoint: bool = False
         self.sloads_before_call: Set[str] = set()
+        # Access-control tracking (consumed by AccessControlEscalationDetector):
+        # set once this path has executed a CALLER (the function read msg.sender).
+        # A privileged write/sink reached on a path that read the sender but never
+        # bound a constraint on it is an unguarded-ownership escalation. This
+        # lives on the machine state so it propagates across path forks.
+        self.caller_loaded: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -67,6 +73,7 @@ class MachineState:
         new.sloads_seen = set(self.sloads_seen)
         new.call_checkpoint = self.call_checkpoint
         new.sloads_before_call = set(self.sloads_before_call)
+        new.caller_loaded = self.caller_loaded
         return new
 
     def fork_world(self) -> None:
