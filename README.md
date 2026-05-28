@@ -73,7 +73,7 @@ oracle --contract PATH
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
-       [--format {json,h1md}]     # default json
+       [--format {json,h1md,sarif}]  # default json
 ```
 
 - `--contract` — path to a `.sol` source file **or** a `.bin` EVM bytecode blob.
@@ -90,7 +90,8 @@ oracle --contract PATH
   reported with `confidence: timeout` and no `trigger_input`, so the dense path
   surfaces for manual review instead of silently disappearing. Use `0` to
   disable the per-query limit.
-- `--format` — `json` (machine-readable) or `h1md` (HackerOne-style markdown report).
+- `--format` — `json` (machine-readable), `h1md` (HackerOne-style markdown
+  report), or `sarif` (SARIF v2.1.0 for GitHub code scanning / CI ingestion).
 
 Every finding carries:
 
@@ -312,6 +313,25 @@ decorated `@pytest.mark.slow` and are excluded from the default run.
   Opcode / pc`) so a triage reader gets the executive view before the detail —
   followed by one section per finding with the trigger input and the execution
   trace.
+- **`sarif`** — a [SARIF v2.1.0](https://sarifweb.azurewebsites.net/) document,
+  the OASIS static-analysis interchange format that GitHub Advanced Security
+  code scanning, Azure DevOps, and most security dashboards ingest directly.
+  Each oracle detector category becomes a SARIF *rule* (`ruleId` = the category,
+  so alerts can be triaged/suppressed by bug class); each finding becomes a
+  *result* whose `level` is `error` for reachable High/Medium bugs and whose
+  `properties.security-severity` (`8.0` / `5.0` / `2.0`) drives GitHub's alert
+  banding. The vulnerable opcode's program counter is exposed as the result
+  location's `startLine` (`pc + 1`), and `pc`, `opcode`, `depth`,
+  `trigger_input`, and `confidence` ride along in `properties`. This lets an
+  oracle run drop straight into a CI `github/codeql-action/upload-sarif` step
+  with no glue code:
+
+  ```bash
+  oracle --contract Vault.sol --input-type sol --check all --format sarif > oracle.sarif
+  # then in a GitHub Actions workflow:
+  #   - uses: github/codeql-action/upload-sarif@v3
+  #     with: { sarif_file: oracle.sarif }
+  ```
 
 ---
 

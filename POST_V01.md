@@ -266,6 +266,38 @@ hit timeout produce `"confidence": "timeout"` findings (same as `unknown`).
 
 ---
 
+### 11. SARIF v2.1.0 output format ✅ IMPLEMENTED (Phase 2, Rotation 10)
+
+**Status:** Shipped. Added a `--format sarif` option (alongside `json` / `h1md`)
+backed by a new `format_sarif` in `report.py`. The formatter emits a SARIF
+v2.1.0 document: one `reportingDescriptor` (rule) per distinct detector category
+(deduplicated, `id` = category, with `defaultConfiguration.level` and a
+`properties.security-severity` of `8.0`/`5.0`/`2.0`), and one `result` per
+finding (`level` `error` for High/Medium, `warning` otherwise; a physical
+location whose `startLine` is `pc + 1`; and `pc`/`opcode`/`depth`/
+`trigger_input`/`confidence` carried in `result.properties`). Pure formatting
+over the already-computed findings — no analysis logic, no new dependency, the
+JSON finding format is unchanged. Also filled the two missing `_TITLE` entries
+(`reentrancy`, `access_control_escalation`) so rule short-descriptions and the
+h1md headings render proper titles instead of the raw category string. Tests:
+ten new SARIF cases in `tests/test_report.py` (top-level shape, one-result-
+per-finding, rule dedup, severity→level mapping, security-severity property,
+location/pc line, result properties, confidence surfacing, empty run, newer-
+detector titles, dispatch) plus a CLI `--format sarif` choice test.
+
+**Why it matters:** SARIF is the OASIS standard consumed by GitHub Advanced
+Security code scanning, Azure DevOps, and most security dashboards. Emitting it
+lets an oracle run drop straight into a CI `upload-sarif` step with zero glue
+code — directly serving oracle's "clean, scriptable symbolic engine" niche
+(the landscape notes flag scriptability as oracle's key differentiator). This
+was selected as the Rotation 10 item because the two remaining numbered roadmap
+items are both blocked: #7 (counterexample validator) requires `py-evm`, and #10
+(Python 3.14) is blocked on upstream `coincurve` wheels.
+
+**Estimated effort:** Low. Pure formatting in `report.py`, one CLI flag value.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on
