@@ -213,7 +213,20 @@ back into oracle's report format is straightforward.
 
 ---
 
-### 8. h1md report: severity-banded summary block
+### 8. h1md report: severity-banded summary block ✅ IMPLEMENTED (Phase 2, Rotation 9)
+
+**Status:** Shipped. `format_h1md` now emits a `## Summary` block immediately
+after the `**Findings:**` count and before the first per-finding section
+(non-empty reports only). The block has two parts: (1) a severity banding line
+(`**Severity:** 2 High, 1 Medium`) that lists only non-zero bands, highest
+severity first — any non-standard severity value is title-cased and appended;
+and (2) a jump table (`| # | Severity | Finding | Opcode | pc |`) with one row
+per finding linking the triage reader straight to the relevant detail section.
+Pure formatting over the already-computed findings — zero logic risk, no change
+to the JSON format. Tests: four new cases in `tests/test_report.py` cover the
+banding string and order, the table rows, summary-before-findings ordering,
+omission of zero bands for a single-severity report, and the empty-report case
+(no summary block).
 
 **Why it matters:** When submitting to bug bounty platforms, triage teams need
 a one-page executive summary above the per-finding sections. The current h1md
@@ -275,7 +288,7 @@ change.
 | 2 | Missing opcode handlers (#1) | Medium effort, unblocks post-call reentrancy + ether-leak paths |
 | 3 | Reentrancy detector (#2) | Most-requested bug class; architecture already supports it |
 | 4 | `--timeout` flag (#9) ✅ | Safety net before v0.2 goes to wider users |
-| 5 | h1md summary block (#8) | Zero-risk polish |
+| 5 | h1md summary block (#8) ✅ | Zero-risk polish |
 | 6 | Multi-transaction exploration (#4) | Game-changer for access-control bugs; save for a dedicated lap |
 | 7 | Access-control detector (#5) | Depends on multi-tx for full value |
 | 8 | Keccak modelling (#6) | Research-heavy; high reward if correct |
