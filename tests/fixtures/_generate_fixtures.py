@@ -25,6 +25,7 @@ CONTRACTS = {
     "reentrancy_vuln.sol": "ReentrancyVuln",
     "reentrancy_safe.sol": "ReentrancySafe",
     "stateful-selfdestruct.sol": "StatefulSelfdestruct",
+    "signed-arith-guard.sol": "SignedArithGuard",
 }
 
 

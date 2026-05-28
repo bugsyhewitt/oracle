@@ -183,6 +183,35 @@ oracle --contract tests/fixtures/deep-assertion.sol \
 
 ---
 
+## Opcode coverage
+
+oracle's symbolic-EVM engine implements the opcodes its detectors need to keep
+a path **alive** all the way to a vulnerable sink. Unhandled opcodes stop a
+path conservatively (sound-by-omission), so missing handlers manifest as
+*missed* findings rather than crashes.
+
+Beyond the stack/memory/storage/control-flow core, oracle models the full set
+of EVM arithmetic and bit ops with **exact two's-complement semantics** —
+including the signed and modular operations that earlier symbolic engines
+often skip:
+
+| Opcode | Handler | Notes |
+|---|---|---|
+| `SAR` | arithmetic right shift | sign bit replicated into the vacated high bits |
+| `SDIV` / `SMOD` | signed division / modulo | div/mod by zero → `0` (EVM spec); `SMOD` follows the sign of the dividend |
+| `ADDMOD` / `MULMOD` | `(a±b) % N` / `(a·b) % N` | computed in a wider intermediate so the `% N` is overflow-exact; `N == 0` → `0` |
+| `SIGNEXTEND` | sign-extend byte `b` | the opcode solc emits for `int8`/`int16`/`int32` casts |
+| `BYTE` | big-endian byte select | byte index `≥ 32` → `0` |
+
+This matters for real Solidity: any contract that uses `int*` arithmetic emits
+`SIGNEXTEND` / `SDIV` / `SMOD` / `SAR`, and a guard built on signed comparison
+sits in front of the interesting code. With these handlers oracle explores
+*through* the signed-arithmetic guard instead of halting at it — see
+[`tests/fixtures/signed-arith-guard.sol`](tests/fixtures/signed-arith-guard.sol),
+which gates a reachable `SELFDESTRUCT` behind exactly that pattern.
+
+---
+
 ## Multi-transaction (stateful) exploration
 
 oracle v0.1 models a **single** transaction starting from fresh, all-zero
