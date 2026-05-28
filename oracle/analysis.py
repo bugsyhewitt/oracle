@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from oracle.laser.detectors import DETECTOR_REGISTRY
-from oracle.laser.disassembler import parse_bytecode
+from oracle.laser.disassembler import Disassembly, parse_bytecode
 from oracle.laser.smt import Solver
 from oracle.laser.vm import SymbolicVM
 
@@ -167,6 +167,76 @@ def analyze(
         seen.add(key)
         findings.append(solved)
     return findings
+
+
+def compute_coverage(
+    bytecode_input,
+    checks: List[str],
+    max_depth: int = 12,
+    sequence_depth: int = 1,
+) -> dict:
+    """Explore the contract and report which instructions were reached.
+
+    Coverage answers the question a "0 findings" run leaves open: did oracle
+    actually explore the contract, or did it prune early (depth cap, a halting
+    opcode, reverts)? It runs the *same* bounded symbolic exploration `analyze`
+    uses — registering the same detectors so the explored paths are identical —
+    but records the set of program counters visited across every path instead
+    of solving findings. No Z3 is involved: coverage is a pure property of the
+    exploration, so it is available even when the solver is mocked.
+
+    Returns a dict::
+
+        {
+          "total_instructions": int,   # disassembled instructions
+          "covered_instructions": int, # distinct instructions reached
+          "coverage_pct": float,       # covered / total * 100 (0.0 if empty)
+          "covered_pcs": [int, ...],   # sorted reached program counters
+          "uncovered_pcs": [int, ...], # sorted instruction pcs never reached
+        }
+    """
+    bytecode = parse_bytecode(bytecode_input)
+    factories = _resolve_detectors(checks)
+    if sequence_depth < 1:
+        sequence_depth = 1
+
+    disasm = Disassembly(bytecode)
+    all_pcs = {inst.pc for inst in disasm.instructions}
+
+    visited: set = set()
+    frontier = [(None, [])]
+    for tx_index in range(sequence_depth):
+        epoch = "" if tx_index == 0 else f"tx{tx_index + 1}_"
+        next_frontier = []
+        for initial_world, seed_constraints in frontier:
+            vm = SymbolicVM(
+                bytecode,
+                max_depth=max_depth,
+                epoch=epoch,
+                initial_world=initial_world,
+                seed_constraints=seed_constraints,
+            )
+            for f in factories:
+                vm.register(f())
+            vm.run()
+            visited |= vm.visited_pcs
+            if tx_index + 1 < sequence_depth:
+                for term in vm.terminal_states[:MAX_SEQUENCE_FANOUT]:
+                    next_frontier.append((term.world, list(term.constraints)))
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    covered = visited & all_pcs
+    total = len(all_pcs)
+    pct = (len(covered) / total * 100.0) if total else 0.0
+    return {
+        "total_instructions": total,
+        "covered_instructions": len(covered),
+        "coverage_pct": round(pct, 2),
+        "covered_pcs": sorted(covered),
+        "uncovered_pcs": sorted(all_pcs - covered),
+    }
 
 
 def _explore_sequence(bytecode, factories, max_depth, sequence_depth):

@@ -102,6 +102,77 @@ def test_missing_contract_file_exits_2(capsys):
     assert rc == 2
 
 
+def test_coverage_flag_defaults_to_none():
+    parser = build_parser()
+    ns = parser.parse_args(["--contract", "x.bin", "--input-type", "bytecode"])
+    assert ns.coverage is None
+
+
+def test_coverage_flag_is_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["--contract", "x.bin", "--input-type", "bytecode", "--coverage", "cov.info"]
+    )
+    assert ns.coverage == "cov.info"
+
+
+def test_help_lists_coverage(capsys):
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--coverage" in out
+
+
+def test_cli_coverage_writes_lcov_file(tmp_path, capsys):
+    cov_path = tmp_path / "oracle.info"
+    rc = main(
+        [
+            "--contract",
+            os.path.join(FIXTURES, "assertion-violation.sol"),
+            "--input-type",
+            "sol",
+            "--check",
+            "assertion",
+            "--format",
+            "json",
+            "--coverage",
+            str(cov_path),
+        ]
+    )
+    assert rc == 0
+    # findings still go to stdout as usual
+    err = capsys.readouterr().err
+    assert "coverage:" in err
+    # the LCOV file exists and is well-formed
+    text = cov_path.read_text()
+    assert text.startswith("TN:oracle\n")
+    assert "SF:" in text
+    assert "end_of_record" in text
+    # at least one instruction must have been reached (hit count 1)
+    assert any(line.endswith(",1") for line in text.splitlines() if line.startswith("DA:"))
+    # LF/LH summary lines are present and LH <= LF
+    lf = int([l for l in text.splitlines() if l.startswith("LF:")][0][3:])
+    lh = int([l for l in text.splitlines() if l.startswith("LH:")][0][3:])
+    assert 0 < lh <= lf
+
+
+def test_cli_coverage_bad_path_exits_2(capsys):
+    rc = main(
+        [
+            "--contract",
+            os.path.join(FIXTURES, "assertion-violation.sol"),
+            "--input-type",
+            "sol",
+            "--check",
+            "assertion",
+            "--coverage",
+            "/no/such/dir/cov.info",
+        ]
+    )
+    assert rc == 2
+
+
 def test_cli_json_output_assertion(capsys):
     rc = main(
         [

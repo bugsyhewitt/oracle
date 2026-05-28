@@ -90,6 +90,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--coverage",
+        default=None,
+        metavar="PATH",
+        help=(
+            "write an LCOV instruction-coverage tracefile to PATH (each EVM "
+            "instruction is one coverage line). Reports how much of the "
+            "contract the symbolic exploration reached vs. pruned, so a "
+            "'0 findings' run can be distinguished from an under-explored one. "
+            "A one-line coverage summary is also printed to stderr."
+        ),
+    )
+    parser.add_argument(
         "--contract-name",
         default=None,
         help="name of the contract to compile when a .sol defines several",
@@ -130,8 +142,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stderr.write(f"error: could not load contract: {exc}\n")
         return 2
 
-    from oracle.analysis import analyze
-    from oracle.report import format_report
+    from oracle.analysis import analyze, compute_coverage
+    from oracle.report import format_coverage_lcov, format_report
 
     if args.sequence_depth < 1:
         sys.stderr.write("error: --sequence-depth must be >= 1\n")
@@ -152,6 +164,33 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:
         sys.stderr.write(f"error: analysis failed: {exc}\n")
         return 3
+
+    if args.coverage:
+        try:
+            coverage = compute_coverage(
+                bytecode,
+                checks,
+                max_depth=args.max_depth,
+                sequence_depth=args.sequence_depth,
+            )
+        except Exception as exc:
+            sys.stderr.write(f"error: coverage computation failed: {exc}\n")
+            return 3
+        try:
+            with open(args.coverage, "w") as fh:
+                fh.write(format_coverage_lcov(coverage, args.contract))
+        except OSError as exc:
+            sys.stderr.write(f"error: could not write coverage file: {exc}\n")
+            return 2
+        sys.stderr.write(
+            "coverage: {covered}/{total} instructions "
+            "({pct}%) -> {path}\n".format(
+                covered=coverage["covered_instructions"],
+                total=coverage["total_instructions"],
+                pct=coverage["coverage_pct"],
+                path=args.coverage,
+            )
+        )
 
     output = format_report(findings, args.contract, args.format)
     sys.stdout.write(output)
