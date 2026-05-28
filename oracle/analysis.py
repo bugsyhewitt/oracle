@@ -19,14 +19,29 @@ from oracle.laser.disassembler import parse_bytecode
 from oracle.laser.smt import Solver
 from oracle.laser.vm import SymbolicVM
 
+# Default per-query Z3 timeout in seconds. A single hard query on a
+# constraint-dense contract can otherwise hang oracle indefinitely. mythril uses
+# 25s; oracle defaults to 30s. 0 disables the per-query timeout entirely.
+DEFAULT_TIMEOUT_SECONDS = 30
 
-def solve_finding(candidate: dict) -> Optional[dict]:
+
+def solve_finding(candidate: dict, timeout: Optional[int] = None) -> Optional[dict]:
     """Return an enriched finding if reachable, else None.
 
     THIS is the Z3 boundary. Tests mock this function (or `Solver`) to avoid
     invoking the solver in the default run.
+
+    `timeout` is the per-query Z3 budget in seconds. When a query exhausts that
+    budget (or Z3 otherwise returns `unknown`) the candidate is not dropped: it
+    is reported with `confidence == "timeout"` and no trigger input, so a
+    constraint-dense path is surfaced for manual review rather than silently
+    lost. A satisfiable query yields a finding with `confidence == "confirmed"`.
+    A timeout of 0 (or None) disables the per-query limit.
     """
     solver = Solver()
+    if timeout:
+        # BaseSolver.set_timeout takes milliseconds.
+        solver.set_timeout(int(timeout) * 1000)
     for c in candidate.get("constraints", []):
         solver.add(c)
     if "extra_constraint" in candidate:
@@ -36,8 +51,13 @@ def solve_finding(candidate: dict) -> Optional[dict]:
     # z3 returns z3.sat / z3.unsat / z3.unknown
     import z3
 
-    if result != z3.sat:
+    if result == z3.unsat:
         return None
+
+    if result == z3.unknown:
+        # Timed out (or otherwise undecided): keep the candidate but flag it so
+        # the operator knows the trigger input could not be solved.
+        return _finalize(candidate, {}, confidence="timeout")
 
     model = solver.model()
     trigger_input = {}
@@ -48,7 +68,7 @@ def solve_finding(candidate: dict) -> Optional[dict]:
         except Exception:
             trigger_input[name] = None
 
-    return _finalize(candidate, trigger_input)
+    return _finalize(candidate, trigger_input, confidence="confirmed")
 
 
 def _z3_to_hex(val) -> str:
@@ -59,7 +79,9 @@ def _z3_to_hex(val) -> str:
     return f"0x{n:064x}"
 
 
-def _finalize(candidate: dict, trigger_input: dict) -> dict:
+def _finalize(
+    candidate: dict, trigger_input: dict, confidence: str = "confirmed"
+) -> dict:
     return {
         "category": candidate["category"],
         "severity": candidate["severity"],
@@ -68,6 +90,7 @@ def _finalize(candidate: dict, trigger_input: dict) -> dict:
         "depth": candidate.get("depth", 0),
         "trace": candidate["trace"],
         "trigger_input": trigger_input,
+        "confidence": confidence,
     }
 
 
@@ -103,6 +126,7 @@ def analyze(
     checks: List[str],
     max_depth: int = 12,
     sequence_depth: int = 1,
+    timeout: Optional[int] = DEFAULT_TIMEOUT_SECONDS,
 ) -> List[dict]:
     """Run the requested checks over the bytecode and return solved findings.
 
@@ -115,6 +139,10 @@ def analyze(
         with fresh symbolic inputs. This surfaces bugs that require setup +
         trigger across separate calls (e.g. `init()` then `admin()`), composing
         the path constraints of every transaction in the sequence.
+
+    `timeout` bounds each individual Z3 query (in seconds). A query that exceeds
+    it is reported with `confidence == "timeout"` rather than dropped, so dense
+    paths surface for manual review instead of hanging the run. 0 disables it.
     """
     bytecode = parse_bytecode(bytecode_input)
     factories = _resolve_detectors(checks)
@@ -128,7 +156,7 @@ def analyze(
     findings: List[dict] = []
     seen = set()
     for candidate in candidates:
-        solved = solve_finding(candidate)
+        solved = solve_finding(candidate, timeout=timeout)
         if solved is None:
             continue
         # de-duplicate findings at the same pc/category/depth so the same

@@ -227,7 +227,19 @@ template.
 
 ---
 
-### 9. `--timeout` flag and Z3 per-finding timeout
+### 9. `--timeout` flag and Z3 per-finding timeout ✅ IMPLEMENTED (Phase 2, Rotation 8)
+
+**Status:** Shipped. Added a `--timeout SECONDS` CLI flag (default `30`, `0`
+disables) plumbed through `analyze(..., timeout=)` into `solve_finding`, which
+now calls `Solver.set_timeout(seconds * 1000)`. A `z3.unknown` result (timeout
+or otherwise undecided) is no longer silently dropped: the candidate is kept and
+flagged `confidence: "timeout"` with an empty `trigger_input`, so dense paths
+surface for manual review. Satisfiable findings carry `confidence: "confirmed"`;
+the h1md report renders a confidence banner (with a "re-run with a larger
+`--timeout`" hint for timeouts). CLI validates `--timeout >= 0`. Tests:
+`tests/test_timeout.py` (14 default + 1 slow real-Z3) cover CLI parsing,
+the sat/unsat/unknown → confirmed/dropped/timeout mapping via a fake solver,
+timeout-ms conversion, the `analyze` end-to-end thread, and report rendering.
 
 **Why it matters:** `solve_finding` has no timeout. A single hard Z3 query can
 hang oracle indefinitely on a path-constraint-dense contract. mythril sets a
@@ -262,7 +274,7 @@ change.
 | 1 | SAR / SDIV / arithmetic completeness (#3) | Low effort, immediate path-coverage uplift; unblocks everything else |
 | 2 | Missing opcode handlers (#1) | Medium effort, unblocks post-call reentrancy + ether-leak paths |
 | 3 | Reentrancy detector (#2) | Most-requested bug class; architecture already supports it |
-| 4 | `--timeout` flag (#9) | Safety net before v0.2 goes to wider users |
+| 4 | `--timeout` flag (#9) ✅ | Safety net before v0.2 goes to wider users |
 | 5 | h1md summary block (#8) | Zero-risk polish |
 | 6 | Multi-transaction exploration (#4) | Game-changer for access-control bugs; save for a dedicated lap |
 | 7 | Access-control detector (#5) | Depends on multi-tx for full value |

@@ -70,6 +70,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=30,
+        metavar="SECONDS",
+        help=(
+            "per-query Z3 solver timeout in seconds (default: 30). A query that "
+            "exceeds this is reported with confidence=timeout instead of hanging "
+            "the run. Use 0 to disable the per-query limit."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=FORMAT_CHOICES,
         default="json",
@@ -123,12 +134,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stderr.write("error: --sequence-depth must be >= 1\n")
         return 2
 
+    if args.timeout < 0:
+        sys.stderr.write("error: --timeout must be >= 0\n")
+        return 2
+
     try:
         findings = analyze(
             bytecode,
             checks,
             max_depth=args.max_depth,
             sequence_depth=args.sequence_depth,
+            timeout=args.timeout,
         )
     except Exception as exc:
         sys.stderr.write(f"error: analysis failed: {exc}\n")

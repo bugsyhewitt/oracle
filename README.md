@@ -72,6 +72,7 @@ oracle --contract PATH
        [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
+       [--timeout SECONDS]        # default 30 (0 = no limit)
        [--format {json,h1md}]     # default json
 ```
 
@@ -83,15 +84,23 @@ oracle --contract PATH
 - `--sequence-depth` — number of transactions to sequence for **stateful**
   exploration (default `1` = single-transaction analysis). See
   [Multi-transaction exploration](#multi-transaction-stateful-exploration).
+- `--timeout` — per-query Z3 solver budget in **seconds** (default `30`). A
+  single hard query on a constraint-dense contract can otherwise hang the run
+  indefinitely. A query that exceeds the budget is **not dropped** — it is
+  reported with `confidence: timeout` and no `trigger_input`, so the dense path
+  surfaces for manual review instead of silently disappearing. Use `0` to
+  disable the per-query limit.
 - `--format` — `json` (machine-readable) or `h1md` (HackerOne-style markdown report).
 
 Every finding carries:
 
 - `category`, `severity`
+- `confidence` — `confirmed` (Z3 produced a satisfying model with a concrete
+  trigger) or `timeout` (the query exceeded `--timeout`; reachability undecided).
 - `trace` — the array of EVM ops leading to the vulnerable state
 - `trigger_input` — the concrete symbolic transaction input Z3 found that
   triggers the bug (the function selector + decoded arguments, `callvalue`,
-  `caller`).
+  `caller`). Empty `{}` for `timeout` findings.
 
 ---
 

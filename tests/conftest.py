@@ -17,20 +17,23 @@ import pytest
 import oracle.analysis as analysis
 
 
-def _stub_solve_finding(candidate):
+def _stub_solve_finding(candidate, timeout=None):
     """Deterministic stand-in for solve_finding that never invokes Z3.
 
     It treats every reached candidate as satisfiable (which is the case for
     every shipped fixture) and synthesises a trigger_input by reading any
     concrete numerals out of the candidate's symbols, defaulting others to a
     fixed sentinel. This keeps default tests fast, hermetic, and Z3-free.
+
+    Accepts (and ignores) the `timeout` keyword so it stays signature-compatible
+    with the real `solve_finding` that `analyze` now calls with `timeout=`.
     """
     trigger_input = {}
     for name in candidate.get("symbols", {}):
         # Without Z3 we cannot solve; emit a stable placeholder so the shape of
         # the finding (and thus the report) is still exercised by default tests.
         trigger_input[name] = "0x" + "00" * 32
-    return analysis._finalize(candidate, trigger_input)
+    return analysis._finalize(candidate, trigger_input, confidence="confirmed")
 
 
 @pytest.fixture(autouse=True)
