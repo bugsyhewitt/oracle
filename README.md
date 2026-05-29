@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -504,6 +504,39 @@ randomness oracle (VRF), never a raw chain attribute. (This rotation also adds
 the `BLOCKHASH` opcode handler the engine previously lacked, so paths through a
 `blockhash(n)` call no longer halt at the opcode.)
 
+### `tx-order` — transaction order dependence (SWC-114)
+
+```bash
+oracle --contract tests/fixtures/tx-order-vuln.sol \
+       --input-type sol --check tx-order --max-depth 40 --format json
+```
+
+Flags control flow that **branches on `tx.gasprice`** (`category:
+"transaction_order_dependence"`, severity `medium`). The order in which
+transactions execute inside a block is chosen by the block proposer / searcher
+(by fee), not by the contract, so a contract whose outcome depends on ordering is
+exposed to front-running and sandwich attacks. The most direct on-chain signal of
+that exposure is a contract that gates logic on `tx.gasprice` itself — a misguided
+gas-price ceiling meant to deter front-running (`require(tx.gasprice <= max)`,
+itself trivially satisfiable) or a gas-price-derived outcome. `tx.gasprice` is set
+freely by the sender and is the exact lever that governs ordering, so gating on it
+is a security decision driven by an attacker-controlled, ordering-determining value
+(SWC-114, "Transaction Order Dependence"). `tx-order-vuln.sol`'s `claim()` gates a
+reward on `tx.gasprice <= maxGasPrice` and is flagged.
+
+The discriminating signal is that a path constraint references the `gasprice` leaf
+— an `if (tx.gasprice ...)` guard compiles to a comparison feeding a JUMPI, whose
+condition carries the gas-price term. A contract that merely *reads* the gas price
+for a non-control-flow purpose — a view getter that *returns* it, the way
+`tx-order-safe.sol`'s `currentGasPrice()` does — never branches on it and is
+**not** flagged. This is distinct from `timestamp` (SWC-116, a proposer-chosen
+*time* proxy) and `blockhash-randomness` (SWC-120, a *randomness* source):
+SWC-114 is the *ordering* bug class, with its own remediation — commit-reveal
+schemes, batch auctions, submarine sends, or slippage bounds, never logic that
+trusts gas price or transaction order. (This rotation also adds a dedicated
+`GASPRICE` opcode handler that records the read for the detector; the symbol name
+is unchanged.)
+
 ### bytecode input (no solc)
 
 ```bash
@@ -551,12 +584,13 @@ sits in front of the interesting code. With these handlers oracle explores
 [`tests/fixtures/signed-arith-guard.sol`](tests/fixtures/signed-arith-guard.sol),
 which gates a reachable `SELFDESTRUCT` behind exactly that pattern.
 
-The block-attribute opcodes are likewise modelled so a path survives through a
-guard built on them: `TIMESTAMP` / `NUMBER` feed the `timestamp` detector
-(SWC-116) and `BLOCKHASH` (`0x40`) feeds the `blockhash-randomness` detector
-(SWC-120). Each mints a fresh symbol the detectors recognise in a branch
-constraint, so a contract that uses `blockhash(n)` no longer halts the path at
-the opcode.
+The block-attribute and transaction-context opcodes are likewise modelled so a
+path survives through a guard built on them: `TIMESTAMP` / `NUMBER` feed the
+`timestamp` detector (SWC-116), `BLOCKHASH` (`0x40`) feeds the
+`blockhash-randomness` detector (SWC-120), and `GASPRICE` (`0x3A`) feeds the
+`tx-order` detector (SWC-114). Each mints a fresh symbol the detectors recognise
+in a branch constraint, so a contract that branches on `blockhash(n)` or
+`tx.gasprice` no longer halts the path at the opcode.
 
 ---
 

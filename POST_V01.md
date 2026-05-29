@@ -947,6 +947,112 @@ or VM change.
 
 ---
 
+### 22. Blockhash weak-randomness detector (SWC-120) ✅ IMPLEMENTED (Phase 2, Rotation 24)
+
+**Status:** Shipped. Added `BlockhashRandomnessDetector` (category
+`blockhash_randomness`, severity `medium`, CLI token `blockhash-randomness`) plus
+the previously-missing `BLOCKHASH` (`0x40`) opcode handler. Flags control flow
+that branches on a block hash used as a randomness source — the lottery / raffle
+/ NFT-mint gambling bug (SWC-120, "Weak Sources of Randomness from Chain
+Attributes"). The discriminating signal is a path constraint referencing a
+`blockhash_<pc>` leaf, reusing the per-path-latch + prefix-AST-walk pattern. Two
+fixtures (`blockhash-randomness-vuln.sol`, `blockhash-randomness-safe.sol`) and
+`tests/test_blockhash_randomness.py`. Deliberately distinct from the SWC-116
+timestamp detector, which scoped itself to the time/number proxy and excluded
+BLOCKHASH as a separate construct. Adding the BLOCKHASH handler was a prerequisite
+(paths previously halted at the unhandled opcode).
+
+---
+
+### 23. Transaction-order-dependence detector (SWC-114) ✅ IMPLEMENTED (Phase 2, Rotation 25)
+
+**Status:** Shipped. Added `TransactionOrderDependenceDetector` (category
+`transaction_order_dependence`, severity `medium`, CLI token `tx-order`) —
+oracle's eighteenth detector and the eleventh new *bug class* of Phase 2 (after
+the Rotation 13 tx.origin, 14 delegatecall, 15 unchecked-call, 16
+DoS-with-failed-call, 17 timestamp-dependence, 18 unprotected-ether-withdrawal,
+19 block-gas-limit-DoS, 22 bypassable-EXTCODESIZE, 23 strict-balance-equality,
+and 24 blockhash-randomness detectors). It flags control flow that **branches on
+`tx.gasprice`** — SWC-114, "Transaction Order Dependence." The order in which
+transactions land in a block is chosen by the proposer / searcher by fee, not by
+the contract, so a contract whose outcome depends on ordering is exposed to
+front-running and sandwich attacks. The single most direct on-chain signal of that
+exposure is a contract that gates logic on `tx.gasprice` itself — a misguided
+gas-price ceiling meant to deter front-running (`require(tx.gasprice <= max)`,
+itself trivially satisfiable) or a gas-price-derived outcome. `tx.gasprice` is set
+freely by the sender and is the exact lever that governs ordering.
+
+The discriminating signal mirrors the SWC-116 timestamp, SWC-120 blockhash, and
+SWC-132 strict-balance detectors: a path constraint references the `gasprice`
+leaf. An `if (tx.gasprice ...)` / `require(tx.gasprice ...)` guard compiles to a
+comparison feeding a JUMPI, whose taken/not-taken constraint carries the gas-price
+term. The detector fires once per path via a per-path `gasprice_flagged` latch
+carried on the MachineState across forks (new state field, cloned in
+`MachineState.clone`), plus a per-detector flagged-pc set that dedupes the same
+guard reached on different paths — the exact pattern the timestamp / blockhash
+detectors use. The reused prefix-AST-walk (`_ast_mentions_prefix`) also matches the
+epoch-prefixed `gasprice` symbol a later transaction would mint. A dedicated
+`_op_gasprice` handler that sets the per-path `gasprice_loaded` latch replaces the
+generic env handler the opcode previously used, giving the detector a cheap gate
+before the AST walk; the symbol name (`gasprice`) is unchanged, so no other
+detector or report path is affected.
+
+This is deliberately distinct from the neighbouring chain-attribute detectors:
+SWC-116 timestamp keys on a proposer-chosen *time* proxy, SWC-120 blockhash on a
+*randomness* source; SWC-114 is the *ordering* bug class, witnessed by a
+gas-price-gated branch, with its own remediation (commit-reveal / batch auctions /
+slippage bounds rather than "don't use time as a deadline" or "don't use a block
+hash for entropy"). The report `_TITLE` map gains `Transaction Order Dependence
+(SWC-114)`; medium severity is already handled by the SARIF level /
+security-severity maps. Tests: `tests/test_tx_order_dependence.py` (21 default + 2
+slow real-Z3) cover registry/CLI registration, severity, the VM `gasprice_loaded`
+latch + clone survival, fixture opcode presence, vulnerable-flagged / safe-clean at
+both the detector and end-to-end layers, the per-pc dedupe, three false-positive
+guards (no-gasprice contract, timestamp guard, blockhash guard), the cross-detector
+separation (timestamp / blockhash detectors do not claim a gas-price guard),
+participation in an `all`-checks run, and h1md + SARIF rendering. Two new fixtures:
+`tx-order-vuln.sol` (`claim(maxGasPrice, amount)` gates a reward behind
+`require(tx.gasprice <= maxGasPrice)`) and `tx-order-safe.sol`
+(`currentGasPrice()` is a read-through view getter that *returns* `tx.gasprice`
+and `deposit()` branches on a calldata argument — the GASPRICE opcode is present
+but no branch is gated on it, proving the detector keys on the value deciding
+control flow, not the opcode).
+
+**Why it matters:** Transaction order dependence is a named SWC entry (SWC-114),
+on every audit checklist, and the root cause of the entire MEV / front-running /
+sandwich-attack class — the approve/transferFrom race, the DEX sandwich, the
+"first claimer wins" gas auction. It was a visible gap in oracle's detector set —
+no prior detector keyed on a gas-price-dependent branch; the neighbouring
+chain-attribute detectors key on time, randomness, code size, and balance, not on
+the ordering surface. It maps cleanly onto oracle's existing architecture — the
+same constraint-AST-walk + per-path-latch machinery the timestamp (SWC-116),
+blockhash (SWC-120), EXTCODESIZE, and strict-balance (SWC-132) detectors use,
+applied to the already-minted gas-price symbol — so it adds a distinct bug class
+with no engine refactor and no new dependency. Selected for Rotation 25 because the
+roster called for assessing SWC-114 (transaction order dependence) or SWC-123
+(requirement violation): SWC-114 is the higher-value, lower-false-positive fit for
+oracle's symbolic model — the gas-price-gated branch is a clean, model-robust
+bytecode signal, whereas SWC-123 (a `require()` whose argument is
+attacker-controllable / always-true) is a source-level / fuzzing concern that
+maps poorly onto a sound bytecode detector and would be false-positive-prone over
+oracle's coarse storage model. This is the same self-contained-detector play that
+shipped Rotations 13-24. This is the assessed "#22+" gap the roster called for.
+
+**Verification of prior state (per roster instruction):** confirmed before
+implementing that neither SWC-114 nor SWC-123 was present — a repo-wide grep for
+`SWC-114`, `SWC-123`, `transaction order`, `requirement violation`, and `tx-order`
+returned only prose mentions of "transaction ordering" inside the SWC-116 timestamp
+docstring/fixture, no detector. SWC-120 (blockhash) was confirmed already shipped in
+Rotation 24 (`BlockhashRandomnessDetector`), so the assessed candidate pair was
+genuinely open and SWC-114 was implemented.
+
+**Estimated effort:** Low. One detector class keying on a gas-price symbol in the
+path constraints (reusing the timestamp / blockhash constraint-walk + per-path
+latch pattern), one dedicated `_op_gasprice` handler, two new MachineState fields,
+a report title, two fixtures. No engine refactor, no new dependency.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

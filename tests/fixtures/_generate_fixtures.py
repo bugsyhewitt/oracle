@@ -45,6 +45,8 @@ CONTRACTS = {
     "strict-balance-safe.sol": "StrictBalanceSafe",
     "blockhash-randomness-vuln.sol": "BlockhashRandomnessVuln",
     "blockhash-randomness-safe.sol": "BlockhashRandomnessSafe",
+    "tx-order-vuln.sol": "TxOrderVuln",
+    "tx-order-safe.sol": "TxOrderSafe",
 }
 
 

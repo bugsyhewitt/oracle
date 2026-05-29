@@ -106,6 +106,20 @@ class MachineState:
         # exactly once per path rather than on every subsequent instruction (the
         # blockhash constraint persists down the path).
         self.blockhash_flagged: bool = False
+        # set once this path has executed a GASPRICE (the function read
+        # `tx.gasprice`). Branching control flow on `tx.gasprice` is a
+        # transaction-order-dependence smell (SWC-114): the gas price is chosen
+        # by the transaction sender and is the lever miners/searchers use to
+        # reorder transactions in a block, so gating logic on it (a gas-price
+        # ceiling meant to deter front-running, or a gas-price-derived outcome)
+        # is decided by a value an attacker freely sets and that determines
+        # ordering. Lives on the machine state so it propagates across path forks.
+        self.gasprice_loaded: bool = False
+        # Set once this path has been flagged for a gas-price-dependent branch
+        # (consumed by TransactionOrderDependenceDetector), so the same guard is
+        # reported exactly once per path rather than on every subsequent
+        # instruction (the gasprice constraint persists down the path).
+        self.gasprice_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -131,6 +145,8 @@ class MachineState:
         new.balance_flagged = self.balance_flagged
         new.blockhash_loaded = self.blockhash_loaded
         new.blockhash_flagged = self.blockhash_flagged
+        new.gasprice_loaded = self.gasprice_loaded
+        new.gasprice_flagged = self.gasprice_flagged
         return new
 
     def fork_world(self) -> None:
