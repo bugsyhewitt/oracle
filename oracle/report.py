@@ -40,6 +40,7 @@ _TITLE = {
     "timestamp_dependence": "Block values as a proxy for time (SWC-116)",
     "unprotected_ether_withdrawal": "Unprotected Ether Withdrawal (SWC-105)",
     "block_gas_limit_dos": "DoS With Block Gas Limit (SWC-128)",
+    "extcodesize_caller_check": "Bypassable EXTCODESIZE caller-type check",
 }
 
 # Highest-to-lowest banding order used in the summary block.

@@ -34,6 +34,7 @@ SEVERITY = {
     "timestamp_dependence": "medium",
     "unprotected_ether_withdrawal": "high",
     "block_gas_limit_dos": "medium",
+    "extcodesize_caller_check": "medium",
 }
 
 
@@ -781,6 +782,79 @@ class BlockGasLimitDosDetector(DetectorHook):
             self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class ExtcodesizeCallerCheckDetector(DetectorHook):
+    """Detects a bypassable EXTCODESIZE-based caller-type check.
+
+    A widespread (and flawed) access-control idiom tries to restrict a function
+    to externally-owned accounts — "no contracts allowed" — by checking the
+    caller's code size: `require(extcodesize(msg.sender) == 0)` (or the inverse,
+    `require(extcodesize(addr) > 0)` to "prove" an address is a deployed
+    contract). Both are unsound. During a contract's **constructor** its code is
+    not yet stored on-chain, so `extcodesize` of the address being deployed
+    returns 0: an attacker simply performs the call from within their
+    constructor and the "EOA-only" guard passes for a contract. The mirror form
+    is equally weak — a future deployment, a self-destructed contract, or a
+    not-yet-deployed CREATE2 address can all make `extcodesize > 0` return the
+    "wrong" answer, so the check cannot be relied on for authorization. The SWC
+    registry and every audit checklist flag any *authorization or trust*
+    decision made on `extcodesize`; the safe primitives are explicit
+    allow/deny lists, signature checks, or simply not distinguishing EOAs from
+    contracts at all.
+
+    Detection signal — the contract **branched control flow on** an external
+    account's code size: a path constraint references an `extcodesize_<pc>` leaf.
+    oracle's VM mints a fresh `extcodesize_<pc>` symbol for every EXTCODESIZE,
+    and an `if (extcodesize(x) ...)` / `require(extcodesize(x) ...)` guard
+    compiles to a comparison feeding a JUMPI, whose taken/not-taken constraint
+    carries the `extcodesize_<pc>` term. A contract that reads a code size for a
+    non-control-flow purpose (storing it, returning it) never produces such a
+    constraint, so this keys on the *decision* use specifically rather than any
+    EXTCODESIZE execution.
+
+    The detector fires once per path. The extcodesize-guard constraint persists
+    for the remainder of the path, so a per-path `extcodesize_flagged` latch
+    (carried on the MachineState across forks) reports each code-size-dependent
+    path exactly once instead of re-emitting on every subsequent instruction. A
+    per-detector set of already-flagged pcs additionally dedupes the same guard
+    reached via different paths.
+
+    [Worker decision: keying on an `extcodesize_<pc>` symbol family appearing in
+    the path constraints (control flow branched on a caller/account code size)
+    mirrors how TimestampDependenceDetector keys on the block-value symbol and
+    TxOriginAuthDetector keys on `origin`, and reuses the same prefix AST-walk
+    (`_ast_mentions_prefix`) the unchecked-call detector uses for its symbol
+    family. The symbols are minted per-pc (`extcodesize_<pc>`), so a prefix match
+    over the `extcodesize` family catches every code-size read without
+    enumerating program counters. It is sound for the canonical
+    `require(extcodesize(x) == 0)` / `> 0` patterns and does not false-positive
+    on a contract that merely reads a code size without gating on it, because a
+    non-branching read never enters a JUMPI condition. No engine change, no new
+    dependency — the VM already mints the extcodesize symbol.]
+    """
+
+    category = "extcodesize_caller_check"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if state.extcodesize_flagged:
+            return  # this path's extcodesize guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on an external code size (control flow gated on a bypassable
+        # is-it-a-contract / is-it-an-EOA test).
+        if any(_ast_mentions_prefix(c, "extcodesize") for c in state.constraints):
+            state.extcodesize_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -960,4 +1034,5 @@ DETECTOR_REGISTRY = {
     "timestamp": TimestampDependenceDetector,
     "ether-withdrawal": UnprotectedEtherWithdrawalDetector,
     "gas-limit-dos": BlockGasLimitDosDetector,
+    "extcodesize-check": ExtcodesizeCallerCheckDetector,
 }

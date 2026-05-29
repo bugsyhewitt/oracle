@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -412,6 +412,36 @@ constant / range-checked argument whose body does **not** re-read storage
 accumulator) never recurs an SLOAD pc and is **not** flagged, and a single,
 non-loop storage read reaches its SLOAD pc at most once per path and is likewise
 clean.
+
+### `extcodesize-check` — bypassable EXTCODESIZE caller-type check
+
+```bash
+oracle --contract tests/fixtures/extcodesize-guard.sol \
+       --input-type sol --check extcodesize-check --format json
+```
+
+Flags control flow that **branches on an external account's code size**
+(`extcodesize(addr)`, `category: "extcodesize_caller_check"`, severity
+`medium`). A widespread, flawed access-control idiom restricts a function to
+externally-owned accounts by checking `require(extcodesize(msg.sender) == 0)`
+("no contracts allowed"), or the inverse `require(extcodesize(addr) > 0)` to
+"prove" an address is a deployed contract. Both are bypassable: during a
+contract's **constructor** its code is not yet on-chain, so `extcodesize`
+returns 0 and an attacker simply calls from within their constructor — the
+"EOA-only" guard passes for a contract. The mirror form is defeated by
+not-yet-deployed CREATE2 addresses and self-destructed contracts, so a code-size
+read can never be relied on for authorization. `extcodesize-guard.sol`'s
+`destroy(target)` gates a `selfdestruct` behind `require(extcodesize(sender) ==
+0)` and is flagged.
+
+The discriminating signal is that a path constraint references an
+`extcodesize_<pc>` leaf — an `if (extcodesize(x) ...)` / `require(extcodesize(x)
+...)` guard compiles to a comparison feeding a JUMPI, whose condition carries
+the code-size term. A contract that authenticates via `msg.sender` and never
+reads a code size (`extcodesize-check-safe.sol`'s owner-gated `destroy()`)
+produces no such constraint and is **not** flagged. The safe primitives are
+explicit allow/deny lists, signature checks, or simply not distinguishing EOAs
+from contracts at all.
 
 ### bytecode input (no solc)
 
