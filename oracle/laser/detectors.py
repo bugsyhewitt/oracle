@@ -32,6 +32,7 @@ SEVERITY = {
     "unchecked_call_return": "medium",
     "dos_failed_call": "medium",
     "timestamp_dependence": "medium",
+    "unprotected_ether_withdrawal": "high",
 }
 
 
@@ -620,6 +621,86 @@ class TimestampDependenceDetector(DetectorHook):
                 )
 
 
+class UnprotectedEtherWithdrawalDetector(DetectorHook):
+    """Detects an unprotected ether withdrawal (SWC-105, "Unprotected Ether
+    Withdrawal").
+
+    A contract that forwards ether out (`addr.transfer(...)` / `addr.send(...)`
+    / a value-bearing low-level `addr.call{value: ...}(...)`) from a **public**
+    function with **no access-control guard** lets *any* address drain the
+    contract's balance. The canonical shape is a public `withdraw()` /
+    `sweep()` / `claim()` that pays out `address(this).balance` (or an
+    attacker-supplied amount) to `msg.sender` with no `require(msg.sender ==
+    owner)` / `onlyOwner` gate — the Parity-wallet `initWallet`+`withdraw` class
+    and a long tail of "anyone can empty the contract" incidents. The safe
+    design gates every value-forwarding function on the caller's authorisation
+    or on a per-account balance the caller is provably entitled to.
+
+    Detection signal — a value-forwarding call op (`CALL` / `CALLCODE`, which
+    can carry `value`; `DELEGATECALL` / `STATICCALL` cannot transfer the
+    contract's own ether, so they are out of scope) reached on a path whose
+    accumulated constraints **never branch on the caller's identity**. In
+    oracle's bitvec constraint model a genuine `require(msg.sender == owner)`
+    guard compiles to a comparison feeding a JUMPI, so the symbolic `caller`
+    leaf appears in a path constraint; a missing/ineffective guard leaves
+    `caller` entirely unconstrained. So an ether-forwarding call on a
+    `caller`-unconstrained path is the unprotected withdrawal. A provably
+    zero-value call (the `value` operand is a concrete 0) carries no ether and
+    is skipped — it is a pure data call, nothing to steal.
+
+    This is distinct from the two neighbouring detectors:
+      * EtherLeakDetector (`unconstrained_ether_transfer`) fires on a call whose
+        *recipient* is attacker-controlled (a symbolic `to`); SWC-105 fires even
+        when the recipient is `msg.sender` — the bug is the **absent access
+        control**, not the recipient. A `withdraw()` that pays the caller their
+        own (unentitled) share has a perfectly ordinary `to == caller` recipient
+        yet is still an unprotected drain.
+      * AccessControlEscalationDetector keys on the privileged *sinks*
+        SELFDESTRUCT / DELEGATECALL and the `owner = msg.sender` SSTORE; SWC-105
+        keys on an ordinary value-forwarding CALL, a different sink class.
+
+    [Worker decision: the discriminating signal is "value-forwarding CALL on a
+    caller-unconstrained path", reusing the `_guarded_by_caller` constraint walk
+    that AccessControlEscalation already uses for `caller`. oracle initialises
+    storage as a constant-0 array, so a withdrawal `value` derived from a storage
+    balance can collapse to a concrete 0; a strict `value != 0` gate would then
+    miss the very pattern this targets. The sound reading therefore skips only a
+    *provably concrete-zero* value (a pure data call) and flags every other
+    value-forwarding call on an unguarded path — absence of a non-zero proof is
+    not treated as proof of a zero-value call. A per-detector flagged-pc set
+    reports each unprotected call site once across paths. The detector does NOT
+    require the recipient to be symbolic (that is EtherLeak's job): the
+    discriminating SWC-105 property is the missing caller guard, which is present
+    whether the payout goes to msg.sender or anywhere else.]
+    """
+
+    category = "unprotected_ether_withdrawal"
+
+    # opcodes that forward the contract's own ether to a callee. DELEGATECALL /
+    # STATICCALL cannot move the contract's balance, so they are out of scope.
+    _VALUE_CALL_OPS = ("CALL", "CALLCODE")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._VALUE_CALL_OPS:
+            return
+        # CALL/CALLCODE stack layout: gas, to, value, inoff, insize, outoff, outsize
+        if len(state.stack) < 3:
+            return
+        value = state.stack[-3]
+        if _is_concrete(value) and _concrete_val(value) == 0:
+            return  # provably zero-value call: a pure data call, no ether to steal
+        if _guarded_by_caller(state, vm):
+            return  # the path branched on msg.sender — access control is present
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -797,4 +878,5 @@ DETECTOR_REGISTRY = {
     "unchecked-call": UncheckedCallReturnDetector,
     "dos-failed-call": DosFailedCallDetector,
     "timestamp": TimestampDependenceDetector,
+    "ether-withdrawal": UnprotectedEtherWithdrawalDetector,
 }

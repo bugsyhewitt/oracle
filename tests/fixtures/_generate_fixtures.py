@@ -38,6 +38,8 @@ CONTRACTS = {
     "dos-failed-call-safe.sol": "DosFailedCallSafe",
     "timestamp-dependence-vuln.sol": "TimestampDependenceVuln",
     "timestamp-dependence-safe.sol": "TimestampDependenceSafe",
+    "ether-withdrawal-vuln.sol": "EtherWithdrawalVuln",
+    "ether-withdrawal-safe.sol": "EtherWithdrawalSafe",
 }
 
 
