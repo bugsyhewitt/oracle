@@ -121,6 +121,23 @@ def format_h1md(findings: List[dict], contract: str) -> str:
             )
         elif confidence:
             lines.append(f"**Confidence:** `{confidence}`")
+        validation = f.get("validation")
+        if validation == "confirmed":
+            lines.append(
+                "**Validation:** `confirmed` — the trigger input was replayed "
+                "concretely and reaches the vulnerable opcode."
+            )
+        elif validation == "unreachable":
+            lines.append(
+                "**Validation:** `unreachable` — concrete replay of the trigger "
+                "input did not reach the vulnerable opcode; review as a "
+                "possible false positive."
+            )
+        elif validation == "skipped":
+            lines.append(
+                "**Validation:** `skipped` — no replayable trigger input "
+                "(e.g. an undecided/timeout finding)."
+            )
         lines.append("")
         lines.append("### Trigger input")
         lines.append("")
@@ -293,6 +310,9 @@ def _sarif_result(finding: dict, contract: str) -> dict:
     }
     if confidence:
         result["properties"]["confidence"] = confidence
+    if "validation" in finding:
+        result["properties"]["validation"] = finding["validation"]
+        result["properties"]["validated"] = finding.get("validated")
     return result
 
 

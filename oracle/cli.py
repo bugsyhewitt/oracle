@@ -109,6 +109,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "concretely replay each finding's trigger input against the "
+            "bytecode in a self-contained EVM and confirm the vulnerable "
+            "opcode is actually reachable. Enriches each finding with "
+            "'validated' (bool) and 'validation' (confirmed/unreachable/"
+            "skipped). Catches symbolic-only false positives without adding a "
+            "dependency. Findings are reported either way; this only annotates."
+        ),
+    )
+    parser.add_argument(
         "--format",
         choices=FORMAT_CHOICES,
         default="json",
@@ -201,6 +213,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             max_depth=args.max_depth,
             sequence_depth=args.sequence_depth,
             timeout=args.timeout,
+            validate=args.validate,
         )
     except Exception as exc:
         sys.stderr.write(f"error: analysis failed: {exc}\n")

@@ -196,7 +196,31 @@ and the SHA3 handler.
 
 ## TIER 3 — Medium value, exploratory
 
-### 7. Concrete-input replay / counterexample validator
+### 7. Concrete-input replay / counterexample validator ✅ IMPLEMENTED (Phase 2, Rotation 21)
+
+**Status:** Shipped. Added a `--validate` flag and a self-contained concrete EVM
+interpreter (`oracle/laser/replay.py`) that re-executes each finding's
+`trigger_input` against the bytecode and confirms whether the vulnerable `pc` is
+actually reachable on the concrete path. Per the spec's lighter alternative, the
+replay engine is a ~200-line concrete interpreter rather than a `py-evm`
+dependency — oracle's "install-clean on modern Python" guarantee makes a
+heavyweight EVM the wrong trade. Each finding gains `validated` (bool) and
+`validation` (`confirmed` = opcode reached / `unreachable` = candidate false
+positive / `skipped` = no replayable trigger, e.g. a `timeout` finding). The
+verdict surfaces in the h1md report (a `**Validation:**` line, with a
+false-positive hint for `unreachable`) and in SARIF `properties`. Validation is
+purely additive: it never adds, drops, or reorders findings, and absent
+`--validate` no `validation`/`validated` keys appear (historical shape
+preserved). The interpreter mirrors the symbolic engine's arithmetic /
+comparison / bitwise / memory / storage / control-flow semantics so the two
+engines agree; abstractly-modelled opcodes (`SHA3`, external calls, `CREATE`)
+halt the replay cleanly rather than crashing, and a step cap bounds adversarial
+calldata. CALLDATASIZE is inferred from the calldata words the model supplies so
+ABI-decoder length gates pass. Tests: `tests/test_replay_validator.py` (22 cases:
+input coercion, control flow, signed/unsigned arithmetic agreement, step cap,
+unmodelled-opcode halt, finding enrichment), plus `analyze(validate=True)`
+integration and CLI/report-rendering cases, plus two real-Z3 slow tests proving
+genuine assertion/overflow/selfdestruct findings replay as `confirmed`.
 
 **Why it matters:** oracle produces trigger inputs but does not validate them
 against a real EVM. False positives undermine confidence. A replay step would:

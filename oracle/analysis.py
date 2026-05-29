@@ -127,6 +127,7 @@ def analyze(
     max_depth: int = 12,
     sequence_depth: int = 1,
     timeout: Optional[int] = DEFAULT_TIMEOUT_SECONDS,
+    validate: bool = False,
 ) -> List[dict]:
     """Run the requested checks over the bytecode and return solved findings.
 
@@ -143,6 +144,13 @@ def analyze(
     `timeout` bounds each individual Z3 query (in seconds). A query that exceeds
     it is reported with `confidence == "timeout"` rather than dropped, so dense
     paths surface for manual review instead of hanging the run. 0 disables it.
+
+    `validate` (False by default) runs a concrete-replay counterexample check on
+    each solved finding: the finding's `trigger_input` is executed against the
+    bytecode in a self-contained concrete EVM, and the finding is enriched with
+    `"validated": bool` / `"validation": str` recording whether the vulnerable
+    `pc` is actually reachable on the concrete path. This catches symbolic-only
+    false positives without affecting the set of findings returned.
     """
     bytecode = parse_bytecode(bytecode_input)
     factories = _resolve_detectors(checks)
@@ -166,6 +174,11 @@ def analyze(
             continue
         seen.add(key)
         findings.append(solved)
+
+    if validate:
+        from oracle.laser.replay import validate_findings
+
+        findings = validate_findings(bytecode, findings)
     return findings
 
 

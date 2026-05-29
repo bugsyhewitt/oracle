@@ -73,6 +73,7 @@ oracle --contract PATH
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
+       [--validate]               # concretely replay each finding's trigger input
        [--format {json,h1md,sarif}]  # default json
        [--coverage PATH]          # write an LCOV instruction-coverage tracefile
        [--fail-on {none,low,medium,high}]  # default none (CI exit-code gate)
@@ -92,6 +93,16 @@ oracle --contract PATH
   reported with `confidence: timeout` and no `trigger_input`, so the dense path
   surfaces for manual review instead of silently disappearing. Use `0` to
   disable the per-query limit.
+- `--validate` — **concretely replay** each finding's `trigger_input` to confirm
+  it is a real counterexample. oracle's symbolic engine reports the model Z3
+  computed; `--validate` feeds that model back through a small, self-contained
+  concrete EVM and checks whether the vulnerable opcode is actually reached. Each
+  finding gains a `validation` verdict (`confirmed` — the opcode was reached;
+  `unreachable` — concrete replay did **not** reach it, flagging a possible false
+  positive; `skipped` — no replayable trigger, e.g. a `timeout` finding) plus a
+  boolean `validated`. Findings are reported either way — this only annotates
+  them. No extra dependency: the replay EVM is part of oracle. See
+  [Counterexample validation](#counterexample-validation).
 - `--format` — `json` (machine-readable), `h1md` (HackerOne-style markdown
   report), or `sarif` (SARIF v2.1.0 for GitHub code scanning / CI ingestion).
 - `--coverage` — write an [LCOV](#instruction-coverage) instruction-coverage
@@ -116,6 +127,8 @@ Every finding carries:
 - `trigger_input` — the concrete symbolic transaction input Z3 found that
   triggers the bug (the function selector + decoded arguments, `callvalue`,
   `caller`). Empty `{}` for `timeout` findings.
+- `validation`, `validated` — present only when `--validate` is passed; the
+  concrete-replay verdict (see [Counterexample validation](#counterexample-validation)).
 
 ---
 
@@ -490,6 +503,46 @@ Notes and bounds:
 
 ---
 
+## Counterexample validation
+
+A symbolic engine reports the model the solver computed: "these inputs make the
+vulnerable opcode reachable." That is a *claim* about EVM semantics. `--validate`
+checks the claim by **replaying the trigger concretely**.
+
+```bash
+oracle --contract Vault.sol --input-type sol --check all --validate --format json
+```
+
+For each finding, oracle feeds the finding's `trigger_input` into a small,
+self-contained concrete EVM interpreter (shipped as part of oracle — **no extra
+dependency**, no `py-evm`), executes the bytecode deterministically, and records
+whether the finding's vulnerable `pc` is actually reached. Each finding gains:
+
+- `validated` — boolean: was the vulnerable opcode reached on the concrete path?
+- `validation` — a verdict string:
+  - `confirmed` — the opcode **was** reached: a replayable counterexample. This
+    is the strongest evidence oracle can offer short of an on-chain transaction.
+  - `unreachable` — the concrete replay **did not** reach the opcode. Treat the
+    finding as a **possible false positive** worth manual review (the symbolic
+    path may have relied on an abstraction the concrete EVM doesn't follow, e.g.
+    `SHA3`/`CALL` return values).
+  - `skipped` — there is no replayable trigger (e.g. a `timeout` finding with an
+    empty `trigger_input`), so no verdict can be produced.
+
+Validation is **purely additive**: it never adds, drops, or reorders findings —
+it only annotates them. Without `--validate`, no `validation`/`validated` keys
+appear, preserving the historical output shape.
+
+The concrete interpreter implements the same arithmetic, comparison,
+bit-manipulation, memory, storage, and control-flow semantics as oracle's
+symbolic engine, so the two agree. Opcodes the symbolic engine reasons about
+abstractly (`SHA3`, external calls, `CREATE`) halt the concrete replay cleanly;
+such a finding simply stays unvalidated rather than crashing the validator.
+Replay is bounded by an instruction-step cap so adversarially shaped calldata
+can never hang the run.
+
+---
+
 ## Testing
 
 ```bash
@@ -525,7 +578,8 @@ decorated `@pytest.mark.slow` and are excluded from the default run.
   `properties.security-severity` (`8.0` / `5.0` / `2.0`) drives GitHub's alert
   banding. The vulnerable opcode's program counter is exposed as the result
   location's `startLine` (`pc + 1`), and `pc`, `opcode`, `depth`,
-  `trigger_input`, and `confidence` ride along in `properties`. This lets an
+  `trigger_input`, and `confidence` ride along in `properties` (plus
+  `validation`/`validated` when `--validate` is used). This lets an
   oracle run drop straight into a CI `github/codeql-action/upload-sarif` step
   with no glue code:
 
