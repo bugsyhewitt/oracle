@@ -49,6 +49,8 @@ CONTRACTS = {
     "blockhash-randomness-safe.sol": "BlockhashRandomnessSafe",
     "tx-order-vuln.sol": "TxOrderVuln",
     "tx-order-safe.sol": "TxOrderSafe",
+    "arbitrary-jump-vuln.sol": "ArbitraryJumpVuln",
+    "arbitrary-jump-safe.sol": "ArbitraryJumpSafe",
 }
 
 

@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -601,6 +601,40 @@ schemes, batch auctions, submarine sends, or slippage bounds, never logic that
 trusts gas price or transaction order. (This rotation also adds a dedicated
 `GASPRICE` opcode handler that records the read for the detector; the symbol name
 is unchanged.)
+
+### `arbitrary-jump` — arbitrary jump with function type variable (SWC-127)
+
+```bash
+oracle --contract tests/fixtures/arbitrary-jump-vuln.sol \
+       --input-type sol --check arbitrary-jump --max-depth 40 --format json
+```
+
+Flags a `JUMP` / `JUMPI` whose **destination operand is derived from calldata**
+(`category: "arbitrary_jump"`, severity `high`). In well-formed compiler output
+every jump destination is a constant the compiler computed, and the only legal
+landing sites are `JUMPDEST` opcodes. A `function` type variable, however, holds
+an internal jump destination (a code offset) as an ordinary 256-bit value; if
+that value is influenced by untrusted input — read from a calldata argument,
+overwritten via inline assembly, or loaded from an attacker-writable slot — then
+invoking it lets an attacker redirect execution to *any* `JUMPDEST` in the
+bytecode, bypassing access checks or re-entering privileged code (SWC-127,
+"Arbitrary Jump with Function Type Variable" — the EVM analogue of a corrupted
+function pointer). `arbitrary-jump-vuln.sol`'s `run()` overwrites a function
+pointer with a calldata-supplied value and invokes it, so the `JUMP` it lowers to
+takes an attacker-controllable target, and is flagged.
+
+The discriminating signal is that the jump destination is **symbolic and
+calldata-derived** — the same untrusted-target test the `delegatecall` detector
+(SWC-112) applies to its call target, here applied to the jump destination. A
+*concrete* destination (ordinary compiler-generated control flow — function
+dispatch, loop back-edges, internal calls to a fixed offset) is **not** flagged:
+`arbitrary-jump-safe.sol`'s `sum()` emits many `JUMP`/`JUMPI` opcodes for its loop
+and branches, all to fixed labels, and is clean — proving the detector keys on the
+calldata-derived target, not the opcode. This is especially valuable for oracle
+because the engine otherwise **halts** a jump whose destination it cannot resolve
+to a concrete `JUMPDEST`, so without this detector the most dangerous case — an
+attacker-steerable jump — would be silently pruned rather than surfaced; the
+detector inspects the operand before that pruning.
 
 ### bytecode input (no solc)
 
