@@ -376,6 +376,52 @@ path, and docs.
 
 ---
 
+### 14. `tx.origin` authentication detector (SWC-115) ✅ IMPLEMENTED (Phase 2, Rotation 13)
+
+**Status:** Shipped. Added `TxOriginAuthDetector` (category
+`tx_origin_authentication`, severity `high`, CLI token `tx-origin`) — oracle's
+eighth detector and the first new *bug class* since the access-control detector
+(Rotation 5). It flags authorization based on `tx.origin`, a classic
+high-severity EVM bug: `tx.origin` is the EOA that *started* the transaction,
+not the immediate caller, so a `require(tx.origin == owner)` guard is bypassable
+by a phishing-relay attack (`msg.sender` is the relay contract, `tx.origin` is
+still the owner). The discriminating signal mirrors the access-control
+detector's `caller`-in-constraints test: the contract *branched control flow on*
+`tx.origin`, so a path constraint references the symbolic `origin` leaf (an
+`if`/`require` on tx.origin compiles to a comparison feeding a JUMPI). To make
+that recognisable, `ORIGIN` now pushes a *stable, named* `origin` symbol (like
+`caller`) instead of a fresh anonymous one per execution, and the VM tracks
+`origin_loaded`. A per-path `tx_origin_flagged` latch (carried on MachineState
+across forks) reports each guarded path exactly once rather than re-emitting on
+every subsequent instruction (the origin constraint persists down the path); a
+per-detector flagged-pc set additionally dedupes a guard reached via multiple
+paths. A contract that authenticates via `msg.sender` — or never reads
+`tx.origin` — produces no such constraint and is not flagged. The report `_TITLE`
+map gains `tx.origin Authentication (SWC-115)` so h1md headings and SARIF rule
+descriptions render properly. Tests: `tests/test_tx_origin.py` (14 default + 2
+slow real-Z3) cover registry/CLI registration, severity, fixture opcode
+presence, vulnerable-flagged / safe-clean at both the detector and end-to-end
+layers, the per-path over-report guard, the msg.sender false-positive guard,
+participation in an `all`-checks run, and h1md rendering. Two new fixtures:
+`tx-origin-vuln.sol` (`require(tx.origin == owner)`) and `tx-origin-safe.sol`
+(`require(msg.sender == owner)`, never reads tx.origin).
+
+**Why it matters:** `tx.origin` authentication is a named entry in the SWC
+registry (SWC-115) and on every audit checklist; it was a visible gap in
+oracle's detector set (seven detectors, none covering it). It maps cleanly onto
+oracle's existing `_ast_mentions` constraint-walk architecture — the same
+machinery the access-control detector already uses — so it adds a high-value bug
+class with no engine refactor and no new dependency. Selected for Rotation 13
+because numbered roadmap items 1-13 are all shipped or blocked: #7
+(counterexample validator) needs `py-evm` and #10 (Python 3.14) needs upstream
+`coincurve` 3.14 wheels, so a new self-contained detector is the highest-value
+unblocked work.
+
+**Estimated effort:** Low-Medium. One detector class, a stable ORIGIN symbol +
+`origin_loaded`/`tx_origin_flagged` state fields, a report title, two fixtures.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

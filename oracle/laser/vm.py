@@ -119,6 +119,13 @@ class SymbolicVM:
         self.calldata = self._calldata_word(0)
         self.callvalue = symbol_factory.BitVecSym(self._sym("callvalue"), 256)
         self.caller = symbol_factory.BitVecSym(self._sym("caller"), 256)
+        # tx.origin — the externally-owned account that started the transaction.
+        # A *stable, named* symbol (like `caller`) rather than a fresh anonymous
+        # one per ORIGIN execution, so a guard that branches on `tx.origin`
+        # always references the same leaf and the tx-origin-auth detector can
+        # recognise it in the path constraints (mirrors how `caller` is matched
+        # by the access-control detector).
+        self.origin = symbol_factory.BitVecSym(self._sym("origin"), 256)
         self.calldatasize = symbol_factory.BitVecSym(self._sym("calldatasize"), 256)
         self.work_count = 0
         # bound on total worklist iterations to guarantee termination
@@ -541,7 +548,12 @@ class SymbolicVM:
         return [state]
 
     def _op_origin(self, state, inst):
-        state.push(symbol_factory.BitVecSym(self._sym("origin"), 256))
+        # record that this path read tx.origin (consumed by the tx-origin-auth
+        # detector to tell "function looked at tx.origin" apart from functions
+        # that never touch it). Push the stable, named `origin` symbol so a
+        # later guard branching on it is recognisable in the path constraints.
+        state.origin_loaded = True
+        state.push(self.origin)
         state.pc = inst.pc + 1
         return [state]
 

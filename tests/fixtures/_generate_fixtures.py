@@ -28,6 +28,8 @@ CONTRACTS = {
     "signed-arith-guard.sol": "SignedArithGuard",
     "access-control-vuln.sol": "AccessControlVuln",
     "access-control-safe.sol": "AccessControlSafe",
+    "tx-origin-vuln.sol": "TxOriginVuln",
+    "tx-origin-safe.sol": "TxOriginSafe",
 }
 
 

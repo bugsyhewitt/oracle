@@ -27,6 +27,7 @@ SEVERITY = {
     "arbitrary_storage_write": "high",
     "reentrancy": "high",
     "access_control_escalation": "high",
+    "tx_origin_authentication": "high",
 }
 
 
@@ -275,6 +276,80 @@ class AccessControlEscalationDetector(DetectorHook):
                 self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class TxOriginAuthDetector(DetectorHook):
+    """Detects `tx.origin`-based authorization (SWC-115).
+
+    Using `tx.origin` to authorize a caller is a classic, high-severity EVM
+    bug: `tx.origin` is the externally-owned account that *started* the
+    transaction, not the immediate caller. A `require(tx.origin == owner)`
+    guard is bypassable by a phishing-relay attack — the owner is tricked into
+    calling a malicious contract, which forwards the call into the victim;
+    `msg.sender` is the attacker's contract but `tx.origin` is still the owner,
+    so the check passes. Solidity's own docs and every audit checklist flag any
+    authentication use of `tx.origin`; the safe primitive is `msg.sender`.
+
+    Detection signal: the contract *branched control flow on* `tx.origin` — a
+    path constraint references the symbolic `origin` leaf. That is exactly the
+    shape an `if (tx.origin == ...)` / `require(tx.origin == ...)` guard
+    compiles to (a comparison feeding a JUMPI, whose taken/not-taken constraint
+    carries the `origin` term). A contract that reads `tx.origin` for logging or
+    a non-control-flow purpose never produces such a constraint, so this keys on
+    the authorization use specifically rather than any ORIGIN execution.
+
+    The detector fires once per path. A `tx.origin` guard's JUMPI appends a
+    branch condition mentioning `origin`, so the first instruction whose path
+    constraints reference `origin` is the guard site. The origin constraint then
+    persists for the remainder of that path, so a per-path `tx_origin_flagged`
+    latch (carried on the MachineState across forks) makes the detector report
+    each guarded path exactly once instead of re-emitting on every subsequent
+    instruction. A per-detector set of already-flagged pcs additionally dedupes
+    the same guard reached via different paths.
+
+    [Worker decision: keying on `origin` appearing in the path constraints
+    (control flow branched on tx.origin) mirrors how AccessControlEscalation
+    keys on `caller` in the constraints, and reuses the same `_ast_mentions`
+    walk. It is sound for the canonical `require(tx.origin == X)` pattern and
+    does not false-positive on contracts that merely read tx.origin without
+    gating on it, because a non-branching read never enters a JUMPI condition.]
+    """
+
+    category = "tx_origin_authentication"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        # Only meaningful once tx.origin has been read on this path. Cheap gate
+        # before the (more expensive) constraint AST walk.
+        if not state.origin_loaded:
+            return
+        if state.tx_origin_flagged:
+            return  # this path's tx.origin guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on tx.origin (control flow gated on the EOA that started the
+        # transaction — the unsafe authentication pattern).
+        name = _origin_symbol_name(vm)
+        if any(_ast_mentions(c, name) for c in state.constraints):
+            state.tx_origin_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
+def _origin_symbol_name(vm) -> str:
+    """The z3 leaf name of this transaction's symbolic tx.origin."""
+    raw = vm.origin.raw if hasattr(vm.origin, "raw") else vm.origin
+    try:
+        return raw.decl().name()
+    except Exception:
+        return "origin"
+
+
 def _caller_symbol_name(vm) -> str:
     """The z3 leaf name of this transaction's symbolic msg.sender."""
     raw = vm.caller.raw if hasattr(vm.caller, "raw") else vm.caller
@@ -380,4 +455,5 @@ DETECTOR_REGISTRY = {
     "storage-write": StorageWriteDetector,
     "reentrancy": ReentrancyDetector,
     "access-control": AccessControlEscalationDetector,
+    "tx-origin": TxOriginAuthDetector,
 }
