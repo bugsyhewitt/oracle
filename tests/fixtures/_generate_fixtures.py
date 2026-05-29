@@ -43,6 +43,8 @@ CONTRACTS = {
     "extcodesize-check-safe.sol": "ExtCodeSizeCheckSafe",
     "strict-balance-vuln.sol": "StrictBalanceVuln",
     "strict-balance-safe.sol": "StrictBalanceSafe",
+    "blockhash-randomness-vuln.sol": "BlockhashRandomnessVuln",
+    "blockhash-randomness-safe.sol": "BlockhashRandomnessSafe",
 }
 
 

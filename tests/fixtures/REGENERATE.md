@@ -22,6 +22,8 @@ You only need to regenerate them if you change a `.sol` fixture.
 | `ether-withdrawal-safe.sol` | `EtherWithdrawalSafe` | `ether-withdrawal-safe.bin` |
 | `strict-balance-vuln.sol` | `StrictBalanceVuln` | `strict-balance-vuln.bin` |
 | `strict-balance-safe.sol` | `StrictBalanceSafe` | `strict-balance-safe.bin` |
+| `blockhash-randomness-vuln.sol` | `BlockhashRandomnessVuln` | `blockhash-randomness-vuln.bin` |
+| `blockhash-randomness-safe.sol` | `BlockhashRandomnessSafe` | `blockhash-randomness-safe.bin` |
 
 `bytecode-selfdestruct.bin` is a **standalone bytecode-only fixture** (a copy of
 the selfdestruct runtime bytecode) used to prove bytecode-input mode works with

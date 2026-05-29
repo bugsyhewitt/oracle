@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -474,6 +474,36 @@ nor is a contract that gates on an internally-tracked deposit accumulator
 cannot influence. The safe design tracks deposits in a dedicated storage
 variable and never compares against the raw `address(this).balance`.
 
+### `blockhash-randomness` — weak randomness from chain attributes (SWC-120)
+
+```bash
+oracle --contract tests/fixtures/blockhash-randomness-vuln.sol \
+       --input-type sol --check blockhash-randomness --max-depth 40 --format json
+```
+
+Flags control flow that **branches on a block hash** (`blockhash(n)`, `category:
+"blockhash_randomness"`, severity `medium`). A block hash is a cheap, tempting
+on-chain "random" source — lotteries, raffles, NFT-mint orderings, and games
+reach for it to pick a winner or gate a payout — but it is **not** secure
+entropy. The block proposer can influence which block is produced, and, more
+cheaply, an attacker calling in the *same* transaction reads the exact same
+`blockhash(n)` the contract uses, so they can compute the "random" outcome in
+advance and only enter when they win (SWC-120, "Weak Sources of Randomness from
+Chain Attributes"). `blockhash-randomness-vuln.sol`'s `play()` gates a payout on
+`uint256(blockhash(blockNo)) % 2 == 0` and is flagged.
+
+The discriminating signal is that a path constraint references a `blockhash_<pc>`
+leaf — an `if (uint(blockhash(n)) ...)` guard compiles to a comparison feeding a
+JUMPI, whose condition carries the block-hash term. A contract that merely
+*reads* a block hash for a non-control-flow purpose — a view getter that
+*returns* it, the way `blockhash-randomness-safe.sol`'s `hashOf()` does — never
+branches on it and is **not** flagged. This is distinct from `timestamp`
+(SWC-116, the time/number *proxy* surface): SWC-120 is the weak-*randomness*
+construct, with its own remediation — a commit-reveal scheme or an external
+randomness oracle (VRF), never a raw chain attribute. (This rotation also adds
+the `BLOCKHASH` opcode handler the engine previously lacked, so paths through a
+`blockhash(n)` call no longer halt at the opcode.)
+
 ### bytecode input (no solc)
 
 ```bash
@@ -520,6 +550,13 @@ sits in front of the interesting code. With these handlers oracle explores
 *through* the signed-arithmetic guard instead of halting at it — see
 [`tests/fixtures/signed-arith-guard.sol`](tests/fixtures/signed-arith-guard.sol),
 which gates a reachable `SELFDESTRUCT` behind exactly that pattern.
+
+The block-attribute opcodes are likewise modelled so a path survives through a
+guard built on them: `TIMESTAMP` / `NUMBER` feed the `timestamp` detector
+(SWC-116) and `BLOCKHASH` (`0x40`) feeds the `blockhash-randomness` detector
+(SWC-120). Each mints a fresh symbol the detectors recognise in a branch
+constraint, so a contract that uses `blockhash(n)` no longer halts the path at
+the opcode.
 
 ---
 

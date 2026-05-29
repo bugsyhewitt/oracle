@@ -56,6 +56,7 @@ OPCODES = {
     0x3D: ("RETURNDATASIZE", 0),
     0x3E: ("RETURNDATACOPY", 0),
     0x3F: ("EXTCODEHASH", 0),
+    0x40: ("BLOCKHASH", 0),
     0x41: ("COINBASE", 0),
     0x42: ("TIMESTAMP", 0),
     0x43: ("NUMBER", 0),

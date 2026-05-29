@@ -586,6 +586,25 @@ class SymbolicVM:
         state.pc = inst.pc + 1
         return [state]
 
+    def _op_blockhash(self, state, inst):
+        # BLOCKHASH(blockNumber) — the hash of a recent block. It is used (and
+        # mis-used) as a cheap on-chain "random" source: a contract that branches
+        # on `blockhash(n)` to pick a winner / gate a payout is deriving a secret
+        # from a chain attribute that the block proposer can influence or that an
+        # attacker observes in the same block (SWC-120, "Weak Sources of
+        # Randomness from Chain Attributes"). Record the read so the
+        # BlockhashRandomnessDetector can tell "the function looked at a block
+        # hash" apart from functions that never touch it, and mint a fresh
+        # per-pc `blockhash_<pc>` symbol so a later guard branching on it is
+        # recognisable in the path constraints. Popping the block-number operand
+        # keeps the stack balanced (previously BLOCKHASH had no handler and the
+        # path halted at this opcode).
+        state.pop()  # blockNumber
+        state.blockhash_loaded = True
+        state.push(symbol_factory.BitVecSym(self._sym(f"blockhash_{inst.pc}"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
     def _generic_env(self, state, inst, name):
         state.push(symbol_factory.BitVecSym(self._sym(name), 256))
         state.pc = inst.pc + 1

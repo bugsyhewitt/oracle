@@ -95,6 +95,17 @@ class MachineState:
         # to one-per-guarded-path. Lives on the machine state so it propagates
         # across path forks.
         self.balance_flagged: bool = False
+        # set once this path has executed a BLOCKHASH (the function read a block
+        # hash). Using `blockhash(n)` as a randomness source is a weak source of
+        # entropy — the block proposer can influence which block is produced and
+        # an attacker in the same transaction sees the same value (SWC-120).
+        # Lives on the machine state so it propagates across path forks.
+        self.blockhash_loaded: bool = False
+        # Set once this path has been flagged for a block-hash-dependent branch
+        # (consumed by BlockhashRandomnessDetector), so the same guard is reported
+        # exactly once per path rather than on every subsequent instruction (the
+        # blockhash constraint persists down the path).
+        self.blockhash_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -118,6 +129,8 @@ class MachineState:
         new.timestamp_flagged = self.timestamp_flagged
         new.extcodesize_flagged = self.extcodesize_flagged
         new.balance_flagged = self.balance_flagged
+        new.blockhash_loaded = self.blockhash_loaded
+        new.blockhash_flagged = self.blockhash_flagged
         return new
 
     def fork_world(self) -> None:

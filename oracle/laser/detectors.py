@@ -36,6 +36,7 @@ SEVERITY = {
     "block_gas_limit_dos": "medium",
     "extcodesize_caller_check": "medium",
     "strict_balance_equality": "medium",
+    "blockhash_randomness": "medium",
 }
 
 
@@ -940,6 +941,95 @@ class StrictBalanceEqualityDetector(DetectorHook):
                 )
 
 
+class BlockhashRandomnessDetector(DetectorHook):
+    """Detects control flow that depends on a block hash used as a randomness
+    source (SWC-120, "Weak Sources of Randomness from Chain Attributes").
+
+    `blockhash(n)` (and the related `block.prevrandao` / `block.difficulty`
+    family) is a cheap, tempting on-chain "random" number — lotteries, raffles,
+    NFT-mint orderings, and games reach for it to pick a winner or gate a payout.
+    It is **not** a secure source of entropy. The value of a recent block hash is
+    influenced by the block proposer (a validator who dislikes the outcome can
+    drop or reorder the block), and — more cheaply — any attacker calling in the
+    *same* transaction reads the exact same `blockhash(n)` the victim contract
+    uses, so they can compute the "random" result in advance and only enter when
+    they win. `blockhash` of the current or a future block returns 0, and only
+    the last 256 blocks are even available. A contract that *branches control
+    flow* on a block hash is therefore making a security decision an attacker can
+    predict or grind. This is the SWC registry's named SWC-120; the safe
+    primitives are a commit-reveal scheme or an external randomness oracle (e.g.
+    a VRF), never a raw chain attribute. Reading a block hash for a
+    non-control-flow purpose (storing it, emitting it, returning it) is harmless;
+    the bug is specifically *deciding control flow* on it.
+
+    Detection signal — the contract **branched control flow on** a block hash:
+    a path constraint references a `blockhash_<pc>` leaf. oracle's VM mints a
+    fresh `blockhash_<pc>` symbol for every BLOCKHASH, and an
+    `if (blockhash(n) % N == ...)` / `require(uint(blockhash(n)) ...)` guard
+    compiles to a comparison feeding a JUMPI, whose taken/not-taken constraint
+    carries the `blockhash_<pc>` term. A contract that merely reads a block hash
+    for a non-control-flow purpose never produces such a constraint, so this keys
+    on the *decision* use specifically rather than any BLOCKHASH execution.
+
+    The detector fires once per path. The blockhash-guard constraint persists for
+    the remainder of the path, so a per-path `blockhash_flagged` latch (carried
+    on the MachineState across forks) reports each block-hash-dependent path
+    exactly once instead of re-emitting on every subsequent instruction. A
+    per-detector set of already-flagged pcs additionally dedupes the same guard
+    reached via different paths.
+
+    This is deliberately distinct from the neighbouring SWC-116
+    timestamp-dependence detector. That detector was scoped to the
+    time/number *proxy* surface (`block.timestamp` / `block.number`) and
+    explicitly excluded BLOCKHASH as "a distinct, only weakly-manipulable
+    construct." SWC-120 is that distinct construct: weak *randomness* derived from
+    a chain attribute, a different named SWC entry with its own remediation
+    (commit-reveal / VRF rather than "don't use time as a deadline"). Keeping the
+    two detectors separate keeps each keyed to one bug class and one SWC id.
+
+    [Worker decision: keying on a `blockhash_<pc>` symbol family appearing in the
+    path constraints (control flow branched on a block hash) mirrors how
+    TimestampDependenceDetector keys on the block-value symbol,
+    ExtcodesizeCallerCheckDetector keys on the `extcodesize` family, and
+    StrictBalanceEqualityDetector keys on the `balance` family, and reuses the
+    same prefix AST-walk (`_ast_mentions_prefix`). The symbols are minted per-pc
+    (`blockhash_<pc>`), so a prefix match over the `blockhash` family catches
+    every block-hash read without enumerating program counters. It is sound for
+    the canonical `blockhash(n)`-as-randomness pattern and does not
+    false-positive on a contract that merely reads a block hash without gating on
+    it, because a non-branching read never enters a JUMPI condition. Adding the
+    BLOCKHASH opcode handler (previously unhandled, so paths halted at it) is a
+    prerequisite — the detector cannot observe a guard on a value the VM never
+    materialises. No new dependency.]
+    """
+
+    category = "blockhash_randomness"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        # Only meaningful once a block hash has been read on this path. Cheap gate
+        # before the (more expensive) constraint AST walk.
+        if not state.blockhash_loaded:
+            return
+        if state.blockhash_flagged:
+            return  # this path's blockhash guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on a block hash (control flow gated on a predictable/grindable chain
+        # attribute — the unsafe weak-randomness pattern).
+        if any(_ast_mentions_prefix(c, "blockhash") for c in state.constraints):
+            state.blockhash_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -1121,4 +1211,5 @@ DETECTOR_REGISTRY = {
     "gas-limit-dos": BlockGasLimitDosDetector,
     "extcodesize-check": ExtcodesizeCallerCheckDetector,
     "strict-balance": StrictBalanceEqualityDetector,
+    "blockhash-randomness": BlockhashRandomnessDetector,
 }
