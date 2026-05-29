@@ -605,7 +605,7 @@ _HANDLERS = {
     "TIMESTAMP": _make_env_pusher("timestamp"),
     "NUMBER": _make_env_pusher("block_number"),
     "COINBASE": _make_env_pusher("coinbase"),
-    "DIFFICULTY": _make_env_pusher("difficulty"),
+    "DIFFICULTY": _make_env_pusher("prevrandao"),
     "GASLIMIT": _make_env_pusher("gaslimit"),
     "CHAINID": _make_env_pusher("chainid"),
 }

@@ -41,6 +41,7 @@ SEVERITY = {
     "blockhash_randomness": "medium",
     "transaction_order_dependence": "medium",
     "arbitrary_jump": "high",
+    "prevrandao_randomness": "medium",
 }
 
 
@@ -1317,6 +1318,99 @@ class TransactionOrderDependenceDetector(DetectorHook):
                 )
 
 
+class PrevrandaoRandomnessDetector(DetectorHook):
+    """Detects control flow that depends on `block.prevrandao` /
+    `block.difficulty` used as a randomness source (SWC-120, "Weak Sources of
+    Randomness from Chain Attributes").
+
+    `block.prevrandao` (the post-Merge name for the `DIFFICULTY` opcode, 0x44;
+    `block.difficulty` pre-Merge) is the single most-reached-for on-chain "random"
+    number after the Merge: lotteries, raffles, NFT-mint orderings, coin-flip
+    games, and airdrop selectors gate a winner / payout on it. It is **not** a
+    secure source of entropy. The value is supplied by the block proposer
+    (the validator who assembles the block contributes the RANDAO reveal), and —
+    more cheaply — any attacker calling in the *same* transaction reads the exact
+    same `block.prevrandao` the victim contract uses, so they can compute the
+    "random" result in advance and only enter when they win. A contract that
+    *branches control flow* on `block.prevrandao` is therefore making a security
+    decision an attacker can predict or grind. This is the SWC registry's named
+    SWC-120; the safe primitives are a commit-reveal scheme or an external
+    randomness oracle (e.g. a VRF), never a raw chain attribute. Reading
+    prevrandao for a non-control-flow purpose (storing it, emitting it, returning
+    it) is harmless; the bug is specifically *deciding control flow* on it.
+
+    Detection signal — the contract **branched control flow on** prevrandao:
+    a path constraint references the `prevrandao` leaf. oracle's VM mints a stable
+    `prevrandao` symbol for the DIFFICULTY/PREVRANDAO opcode, and an
+    `if (block.prevrandao % N == ...)` / `require(block.prevrandao ...)` guard
+    compiles to a comparison feeding a JUMPI, whose taken/not-taken constraint
+    carries the `prevrandao` term. A contract that merely reads prevrandao for a
+    non-control-flow purpose never produces such a constraint, so this keys on the
+    *decision* use specifically rather than any DIFFICULTY execution.
+
+    The detector fires once per path. The prevrandao-guard constraint persists for
+    the remainder of the path, so a per-path `prevrandao_flagged` latch (carried
+    on the MachineState across forks) reports each prevrandao-dependent path
+    exactly once instead of re-emitting on every subsequent instruction. A
+    per-detector set of already-flagged pcs additionally dedupes the same guard
+    reached via different paths.
+
+    This is deliberately distinct from its sibling SWC-120 detector
+    BlockhashRandomnessDetector, which keys on the `blockhash_<pc>` symbol family
+    (the BLOCKHASH opcode, 0x40). `block.prevrandao` and `blockhash(n)` are
+    different chain attributes — the former is the beacon-chain RANDAO mix exposed
+    on the `DIFFICULTY` opcode, the latter the hash of a recent block — minted
+    from different opcodes into different symbol families, and a contract can
+    misuse one without the other. Keeping the two detectors separate keeps each
+    keyed to one opcode and lets a triage team see exactly which chain attribute a
+    contract gambled on. It is also distinct from the SWC-116 timestamp detector
+    (`block.timestamp` / `block.number`, a *time* proxy) and the SWC-114
+    transaction-order detector (`tx.gasprice`, an *ordering* lever).
+
+    [Worker decision: keying on the stable `prevrandao` symbol appearing in the
+    path constraints (control flow branched on prevrandao) mirrors how
+    BlockhashRandomnessDetector keys on the `blockhash` family,
+    TransactionOrderDependenceDetector keys on `gasprice`, and
+    StrictBalanceEqualityDetector keys on the `balance` family, reusing the same
+    prefix AST-walk (`_ast_mentions_prefix`). The VM's `_op_difficulty` was
+    previously a generic env-pusher minting an unflagged "difficulty" symbol with
+    no detector observing it, so prevrandao-as-randomness — a named, common,
+    post-Merge bug class — was an uncovered surface even though every other weak
+    chain-attribute (blockhash, timestamp, gasprice) had a dedicated detector.
+    Renaming the minted symbol to `prevrandao` and setting a `prevrandao_loaded`
+    latch (the same shape as `blockhash_loaded` / `gasprice_loaded`) closes that
+    gap with zero engine refactor and no new dependency. The replay validator's
+    DIFFICULTY env-pusher is renamed in lockstep so a concrete-input replay
+    materialises the same symbol.]
+    """
+
+    category = "prevrandao_randomness"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        # Only meaningful once prevrandao has been read on this path. Cheap gate
+        # before the (more expensive) constraint AST walk.
+        if not state.prevrandao_loaded:
+            return
+        if state.prevrandao_flagged:
+            return  # this path's prevrandao guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on prevrandao (control flow gated on a predictable/grindable chain
+        # attribute — the unsafe weak-randomness pattern).
+        if any(_ast_mentions_prefix(c, "prevrandao") for c in state.constraints):
+            state.prevrandao_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
 class ArbitraryJumpDetector(DetectorHook):
     """Detects a `JUMP` / `JUMPI` whose destination is derived from calldata
     (SWC-127, "Arbitrary Jump with Function Type Variable").
@@ -1581,4 +1675,5 @@ DETECTOR_REGISTRY = {
     "blockhash-randomness": BlockhashRandomnessDetector,
     "tx-order": TransactionOrderDependenceDetector,
     "arbitrary-jump": ArbitraryJumpDetector,
+    "prevrandao-randomness": PrevrandaoRandomnessDetector,
 }

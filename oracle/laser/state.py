@@ -120,6 +120,20 @@ class MachineState:
         # reported exactly once per path rather than on every subsequent
         # instruction (the gasprice constraint persists down the path).
         self.gasprice_flagged: bool = False
+        # set once this path has executed a DIFFICULTY/PREVRANDAO (0x44) — the
+        # function read `block.prevrandao` (post-Merge) / `block.difficulty`
+        # (pre-Merge). It is a weak source of randomness (SWC-120): the value is
+        # set by the block proposer and is observable by an attacker in the same
+        # transaction, so gating a payout / picking a winner on it is a security
+        # decision an attacker can predict or grind. Distinct from BLOCKHASH
+        # (a different chain attribute / symbol family). Lives on the machine
+        # state so it propagates across path forks.
+        self.prevrandao_loaded: bool = False
+        # Set once this path has been flagged for a prevrandao-dependent branch
+        # (consumed by PrevrandaoRandomnessDetector), so the same guard is
+        # reported exactly once per path rather than on every subsequent
+        # instruction (the prevrandao constraint persists down the path).
+        self.prevrandao_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -147,6 +161,8 @@ class MachineState:
         new.blockhash_flagged = self.blockhash_flagged
         new.gasprice_loaded = self.gasprice_loaded
         new.gasprice_flagged = self.gasprice_flagged
+        new.prevrandao_loaded = self.prevrandao_loaded
+        new.prevrandao_flagged = self.prevrandao_flagged
         return new
 
     def fork_world(self) -> None:

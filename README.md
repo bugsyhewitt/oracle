@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -635,6 +635,40 @@ because the engine otherwise **halts** a jump whose destination it cannot resolv
 to a concrete `JUMPDEST`, so without this detector the most dangerous case — an
 attacker-steerable jump — would be silently pruned rather than surfaced; the
 detector inspects the operand before that pruning.
+
+### `prevrandao-randomness` — weak randomness from `block.prevrandao` (SWC-120)
+
+```bash
+oracle --contract tests/fixtures/prevrandao-randomness-vuln.sol \
+       --input-type sol --check prevrandao-randomness --max-depth 40 --format json
+```
+
+Flags control flow that **branches on `block.prevrandao`** (the post-Merge name
+for the `DIFFICULTY` opcode, 0x44; `block.difficulty` pre-Merge — `category:
+"prevrandao_randomness"`, severity `medium`). `block.prevrandao` is the single
+most-reached-for on-chain "random" number after the Merge: lotteries, raffles,
+NFT-mint orderings, coin-flip games, and airdrop selectors gate a winner /
+payout on it. It is **not** secure entropy — the block proposer contributes the
+RANDAO reveal that produces the value, and an attacker calling in the *same*
+transaction reads the same `block.prevrandao` the victim contract uses, so
+they can compute the "random" outcome in advance and only enter when they win
+(SWC-120, "Weak Sources of Randomness from Chain Attributes").
+`prevrandao-randomness-vuln.sol`'s `play()` gates a payout on
+`uint256(block.prevrandao) % 2 == 0` and is flagged.
+
+The discriminating signal is that a path constraint references the stable
+`prevrandao` leaf — an `if (block.prevrandao % N == ...)` guard compiles to a
+comparison feeding a JUMPI, whose branch condition carries the prevrandao term.
+A contract that merely *reads* prevrandao — `prevrandao-randomness-safe.sol`'s
+`currentRandao()` returns it and `record()` stores it without branching — never
+enters a JUMPI condition on it and is clean, proving the detector keys on the
+value deciding control flow, not on the opcode. Deliberately distinct from
+`blockhash-randomness` (also SWC-120, but the BLOCKHASH opcode and a
+`blockhash_<pc>` symbol family — a different chain attribute with the same
+remediation), `timestamp` (SWC-116, a *time* proxy), and `tx-order` (SWC-114, an
+*ordering* lever): a triage team can band by which chain attribute a contract
+gambled on. Safe primitives are a commit-reveal scheme or an external
+randomness oracle (a VRF), never a raw chain attribute.
 
 ### bytecode input (no solc)
 
