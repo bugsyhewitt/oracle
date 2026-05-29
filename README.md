@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -278,6 +278,33 @@ ever having been branched on** (it appears in no path constraint). A
 result is checked — even though Solidity also cleans up the duplicated word with
 a `POP` later — and a checked call (`unchecked-call-safe.sol`) is **not**
 flagged.
+
+### `dos-failed-call` — DoS with failed call / revert in loop (SWC-113)
+
+```bash
+oracle --contract tests/fixtures/dos-failed-call-vuln.sol \
+       --input-type sol --check dos-failed-call --max-depth 24 --format json
+```
+
+Flags an external call (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`) made
+**inside a loop** (`category: "dos_failed_call"`, severity `medium`). A "push"
+payout that `transfer`s/`send`s to every recipient in a loop is a denial-of-
+service surface: an EVM external call hands control to the callee, and
+`transfer`/`send` (or a `require`-checked low-level call) reverts the whole
+transaction when the callee fails. A single recipient that cannot accept the
+call — a contract with a reverting fallback — reverts the *entire* batch, so
+**no** recipient is ever paid. One malicious or broken entry permanently bricks
+the function for everyone (the classic auction-refund / airdrop DoS).
+`dos-failed-call-vuln.sol`'s `distribute(address[] calldata)` `transfer`s in a
+loop and is flagged.
+
+The discriminating signal is that an external call op's program counter is
+reached **more than once on a single path**: oracle's bounded executor unrolls
+loops by revisiting the loop body, so a recurring call pc witnesses that the call
+is loop-bound. (The vulnerable loop needs `--max-depth ≳ 18` to unroll past one
+iteration.) A single, isolated call — the **pull-payment** design where each
+account withdraws its own balance (`dos-failed-call-safe.sol`) — reaches its
+call pc at most once per transaction and is **not** flagged.
 
 ### bytecode input (no solc)
 

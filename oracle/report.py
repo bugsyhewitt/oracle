@@ -35,6 +35,7 @@ _TITLE = {
     "tx_origin_authentication": "tx.origin Authentication (SWC-115)",
     "delegatecall_untrusted_callee": "Delegatecall to Untrusted Callee (SWC-112)",
     "unchecked_call_return": "Unchecked Call Return Value (SWC-104)",
+    "dos_failed_call": "DoS with Failed Call (SWC-113)",
 }
 
 # Highest-to-lowest banding order used in the summary block.

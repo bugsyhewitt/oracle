@@ -30,6 +30,7 @@ SEVERITY = {
     "tx_origin_authentication": "high",
     "delegatecall_untrusted_callee": "high",
     "unchecked_call_return": "medium",
+    "dos_failed_call": "medium",
 }
 
 
@@ -471,6 +472,69 @@ class UncheckedCallReturnDetector(DetectorHook):
         self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class DosFailedCallDetector(DetectorHook):
+    """Detects denial-of-service via a failing external call in a loop
+    (SWC-113, "DoS with Failed Call" / "revert in loop").
+
+    The unsafe pattern is a "push" payout: a contract iterates over a list of
+    recipients and makes an external call (`transfer`/`send`/low-level call)
+    inside the loop body. An EVM external call hands control to the callee, and
+    `transfer`/`send` (and a `require`-checked low-level call) revert the *whole*
+    transaction when the callee fails. A single recipient that cannot accept the
+    call — a contract with a reverting or gas-exhausting fallback — therefore
+    reverts the entire batch, so **no** recipient is ever paid. One malicious or
+    broken entry permanently bricks the function for everyone. This is the
+    classic auction-refund / airdrop / dividend-distribution DoS, and the SWC
+    registry's named SWC-113. The safe design is "pull payment": each account
+    withdraws its own balance in an isolated, single call, so one failure can
+    never block the others.
+
+    Detection signal — an external call op (`CALL`/`CALLCODE`/`DELEGATECALL`/
+    `STATICCALL`) whose **program counter the engine has already executed
+    earlier on this same path**. oracle's bounded executor unrolls loops by
+    revisiting the loop body's instructions, appending each executed `(pc, op)`
+    to the per-path `state.trace`. The detector inspects *before* the
+    instruction executes, so the trace does not yet contain the current pc; if
+    that pc is *already* present in the trace, this call site has been reached
+    before on this path — i.e. it sits inside a loop body that has iterated at
+    least once. A call that is reached at most once per transaction (a pull
+    payment, a single forwarding call) never repeats its pc and is not flagged.
+
+    [Worker decision: the discriminating signal is "the call's pc recurs in the
+    path trace" (the call is inside an iterating loop) rather than attempting to
+    reconstruct the loop's CFG or prove the callee can revert. oracle's executor
+    already unrolls loops onto the trace, so a recurring call pc is a sound,
+    model-robust witness that the call is loop-bound — exactly the SWC-113
+    surface, where one reverting callee in the loop DoSes the batch. It does not
+    false-positive on a single forwarding call or a pull-payment withdraw (their
+    call pc appears once per path), and it is independent of the unchecked-return
+    (SWC-104) and ether-leak detectors, which key on the call's *return value*
+    and *recipient* respectively, not on the call being loop-bound. A
+    per-detector flagged-pc set reports each loop-bound call site once across
+    paths.]
+    """
+
+    category = "dos_failed_call"
+
+    _CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL", "STATICCALL")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._CALL_OPS:
+            return
+        if instruction.pc in self._flagged_pcs:
+            return
+        # The hook runs BEFORE the instruction executes, so this pc is not yet
+        # on the trace. If it is already present, the call site has been reached
+        # before on this path — it is inside a loop body that has iterated.
+        if any(t.pc == instruction.pc for t in state.trace):
+            self._flagged_pcs.add(instruction.pc)
+            self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -646,4 +710,5 @@ DETECTOR_REGISTRY = {
     "tx-origin": TxOriginAuthDetector,
     "delegatecall": DelegatecallUntrustedDetector,
     "unchecked-call": UncheckedCallReturnDetector,
+    "dos-failed-call": DosFailedCallDetector,
 }
