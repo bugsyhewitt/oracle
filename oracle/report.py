@@ -30,6 +30,7 @@ _TITLE = {
     "integer_overflow": "Integer Overflow",
     "integer_underflow": "Integer Underflow (SWC-101)",
     "reachable_selfdestruct": "Reachable SELFDESTRUCT",
+    "unprotected_selfdestruct": "Unprotected SELFDESTRUCT (SWC-106)",
     "unconstrained_ether_transfer": "Unconstrained Ether Transfer",
     "arbitrary_storage_write": "Arbitrary Storage Write",
     "reentrancy": "Reentrancy (check-effects-interactions violation)",
