@@ -29,6 +29,7 @@ SEVERITY = {
     "access_control_escalation": "high",
     "tx_origin_authentication": "high",
     "delegatecall_untrusted_callee": "high",
+    "unchecked_call_return": "medium",
 }
 
 
@@ -401,6 +402,86 @@ class DelegatecallUntrustedDetector(DetectorHook):
             self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class UncheckedCallReturnDetector(DetectorHook):
+    """Detects an unchecked low-level call return value (SWC-104).
+
+    Every EVM call opcode — `CALL`, `CALLCODE`, `DELEGATECALL`, `STATICCALL` —
+    does **not** revert when the callee reverts; it pushes a boolean success
+    word (1 = ok, 0 = failed) onto the stack and execution continues. Solidity's
+    high-level `transfer`/`require(... .call ...)` patterns read that word and
+    revert on failure, but a low-level `addr.call(...)` / `addr.send(...)` whose
+    result is *discarded* lets a failed external call pass silently. The contract
+    then proceeds as though the call succeeded — funds appear sent, state appears
+    updated — which is the canonical "unchecked return value" / "unchecked send"
+    bug (SWC-104, the King-of-the-Ether class of incident).
+
+    Detection signal: a `POP` discards the call's success word **and that word
+    was never branched on** along the path. oracle's VM mints the word as a
+    named symbol (`callretval_<pc>` for CALL/CALLCODE, `staticretval_<pc>` for
+    STATICCALL/DELEGATECALL). A *checked* call routes the word through
+    `ISZERO`/`JUMPI`, so the `callretval`/`staticretval` leaf appears in a path
+    constraint — and Solidity still POPs the duplicated original during stack
+    cleanup, so the bare POP alone is not enough to distinguish the two. An
+    *unchecked* call's word never reaches a JUMPI, so it appears in **no** path
+    constraint; when it is then POPped it is genuinely discarded. The detector
+    therefore fires when a POP is about to discard a call-result value whose
+    symbol family is absent from every accumulated path constraint.
+
+    The detector inspects *before* the POP executes, so the value about to be
+    discarded is the top of stack (`state.stack[-1]`); its AST is walked for a
+    `callretval`/`staticretval` leaf with the same prefix-match machinery the
+    delegatecall detector uses for the calldata family. A per-detector set of
+    already-flagged pcs dedupes the same discard reached on multiple paths.
+
+    [Worker decision: the signal is "the success word is POPped AND was never a
+    branch condition" rather than "the success word is POPped" alone. Solidity's
+    `(bool ok, ) = addr.call(...); require(ok)` DUPs the word for the
+    require's ISZERO/JUMPI and then POPs the original local during stack cleanup,
+    so a bare-POP-of-the-success-word test false-positives on correctly checked
+    calls. Branched-on is decided by whether the call-result symbol family
+    appears in `state.constraints` (JUMPI appends its condition there), reusing
+    the same AST-walk architecture every other oracle detector uses — no engine
+    change. This is sound for the canonical unchecked-send pattern and does not
+    false-positive on a require/if-guarded low-level call.]
+    """
+
+    category = "unchecked_call_return"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic != "POP":
+            return
+        if not state.stack:
+            return
+        discarded = state.stack[-1]
+        if not _mentions_call_result(discarded):
+            return
+        # A checked call branches on its success word, so the call-result symbol
+        # family shows up in a path constraint (JUMPI appends its condition).
+        # If the word being discarded was never branched on, the call result is
+        # genuinely unchecked.
+        if any(_mentions_call_result(c) for c in state.constraints):
+            return
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
+def _mentions_call_result(bv) -> bool:
+    """True if the bitvec value is (or is derived from) a call opcode's success
+    word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
+    `staticretval_<pc>` (STATICCALL/DELEGATECALL), optionally namespaced with a
+    per-transaction epoch prefix, so a prefix match over the symbol family
+    catches every call site without enumerating program counters."""
+    return _ast_mentions_prefix(bv, "callretval") or _ast_mentions_prefix(
+        bv, "staticretval"
+    )
+
+
 def _origin_symbol_name(vm) -> str:
     """The z3 leaf name of this transaction's symbolic tx.origin."""
     raw = vm.origin.raw if hasattr(vm.origin, "raw") else vm.origin
@@ -564,4 +645,5 @@ DETECTOR_REGISTRY = {
     "access-control": AccessControlEscalationDetector,
     "tx-origin": TxOriginAuthDetector,
     "delegatecall": DelegatecallUntrustedDetector,
+    "unchecked-call": UncheckedCallReturnDetector,
 }

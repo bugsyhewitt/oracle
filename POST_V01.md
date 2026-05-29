@@ -474,6 +474,60 @@ prefix walk, a report title, two fixtures.
 
 ---
 
+### 16. Unchecked call return value detector (SWC-104) ✅ IMPLEMENTED (Phase 2, Rotation 15)
+
+**Status:** Shipped. Added `UncheckedCallReturnDetector` (category
+`unchecked_call_return`, severity `medium`, CLI token `unchecked-call`) —
+oracle's tenth detector and the third new *bug class* of Phase 2 (after the
+Rotation 13 tx.origin and Rotation 14 delegatecall detectors). It flags a
+low-level call (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`) whose **boolean
+success word is discarded without ever being branched on** — SWC-104,
+"Unchecked Call Return Value" (the King-of-the-Ether class of incident). An EVM
+call opcode does not revert when the callee reverts; it pushes a success word
+(1/0) and execution continues, so a low-level `addr.call(...)` / `addr.send(...)`
+whose result is ignored lets a failed external call pass silently while the
+contract proceeds as though it succeeded. oracle's VM already mints that word as
+a uniquely-named symbol per call site (`callretval_<pc>` for CALL/CALLCODE,
+`staticretval_<pc>` for STATICCALL/DELEGATECALL), so the detector keys on a `POP`
+that is about to discard a value from that symbol family **and** where the same
+family appears in no accumulated path constraint. The "no path constraint" gate
+is what distinguishes unchecked from checked: a `require(ok)` / `if (!ok)`
+guarded call routes the word through ISZERO/JUMPI (so `callretval` lands in a
+path constraint), even though Solidity also POPs the duplicated original during
+stack cleanup — a bare-POP-of-the-success-word test alone false-positives on
+correctly checked calls. Reuses the same `_ast_mentions_prefix` AST-walk
+machinery the delegatecall detector uses for the calldata family, with a new
+`_mentions_call_result` helper and a per-detector flagged-pc dedupe set. No
+engine change, no new dependency. The report `_TITLE` map gains `Unchecked Call
+Return Value (SWC-104)` so h1md headings and SARIF rule descriptions render
+properly; medium severity is already handled by the SARIF level / security-
+severity maps. Tests: `tests/test_unchecked_call.py` (14 default + 2 slow real-
+Z3) cover registry/CLI registration, severity, fixture opcode presence,
+vulnerable-flagged / safe-clean at both the detector and end-to-end layers, the
+no-call false-positive guard, participation in an `all`-checks run, and h1md +
+SARIF rendering. Two new fixtures: `unchecked-call-vuln.sol` (`pay()` discards a
+`to.call{value: 1}("")` result) and `unchecked-call-safe.sol` (same call, but
+`require(ok, ...)` — CALL still present, so the test proves the detector keys on
+the unbranched, discarded word, not the opcode).
+
+**Why it matters:** Unchecked low-level call return values are a named SWC entry
+(SWC-104), on every audit checklist, and the root cause of the King-of-the-Ether
+Throne incident and a long tail of stuck-funds bugs. It was a visible gap in
+oracle's detector set (nine detectors, none covering it) and maps cleanly onto
+oracle's existing detector architecture — the same concrete/symbolic + AST-walk
+machinery the EtherLeak, access-control, tx.origin, and delegatecall detectors
+use — so it adds a high-value bug class with no engine refactor and no new
+dependency. Selected for Rotation 15 because the numbered roadmap items 1-15 are
+all shipped or blocked (#7 counterexample validator needs `py-evm`, #10 Python
+3.14 needs upstream `coincurve` 3.14 wheels), so a new self-contained detector —
+the same play that shipped Rotations 13 and 14 — is the highest-value unblocked
+work. This is the assessed "#16+" gap the roster called for.
+
+**Estimated effort:** Low-Medium. One detector class, a `_mentions_call_result`
+prefix walk over the existing call-result symbols, a report title, two fixtures.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on
