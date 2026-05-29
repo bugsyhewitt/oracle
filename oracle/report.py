@@ -42,6 +42,7 @@ _TITLE = {
     "block_gas_limit_dos": "DoS With Block Gas Limit (SWC-128)",
     "extcodesize_caller_check": "Bypassable EXTCODESIZE caller-type check",
     "strict_balance_equality": "Unexpected Ether Balance (SWC-132)",
+    "blockhash_randomness": "Weak Randomness from Chain Attributes (SWC-120)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
