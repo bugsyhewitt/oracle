@@ -32,6 +32,7 @@ _TITLE = {
     "arbitrary_storage_write": "Arbitrary Storage Write",
     "reentrancy": "Reentrancy (check-effects-interactions violation)",
     "access_control_escalation": "Access Control Escalation",
+    "tx_origin_authentication": "tx.origin Authentication (SWC-115)",
 }
 
 # Highest-to-lowest banding order used in the summary block.

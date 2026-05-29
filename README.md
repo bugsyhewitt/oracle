@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -210,6 +210,27 @@ path to the sink: a genuine `require(msg.sender == owner)` shows up as a path
 constraint that references the symbolic `caller`. A contract that sets its owner
 once in the constructor and gates every privileged op behind that check
 (`access-control-safe.sol`) is **not** flagged.
+
+### `tx-origin` — tx.origin authentication (SWC-115)
+
+```bash
+oracle --contract tests/fixtures/tx-origin-vuln.sol \
+       --input-type sol --check tx-origin --format json
+```
+
+Flags authorization based on `tx.origin`
+(`category: "tx_origin_authentication"`). `tx.origin` is the externally-owned
+account that **started** the transaction, not the immediate caller, so a
+`require(tx.origin == owner)` guard is bypassable by a phishing-relay attack:
+the owner is tricked into calling a malicious contract, which forwards the call
+into the victim — `msg.sender` is the attacker's contract, but `tx.origin` is
+still the owner, so the check passes. The safe primitive is `msg.sender`.
+
+The discriminating signal is that control flow **branched on** `tx.origin`: an
+`if`/`require` on `tx.origin` compiles to a comparison feeding a `JUMPI`, so a
+path constraint references the symbolic `origin` value. A contract that
+authenticates via `msg.sender` — or never reads `tx.origin` at all
+(`tx-origin-safe.sol`) — is **not** flagged.
 
 ### bytecode input (no solc)
 

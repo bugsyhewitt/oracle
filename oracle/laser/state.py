@@ -57,6 +57,15 @@ class MachineState:
         # bound a constraint on it is an unguarded-ownership escalation. This
         # lives on the machine state so it propagates across path forks.
         self.caller_loaded: bool = False
+        # tx.origin tracking (consumed by TxOriginAuthDetector): set once this
+        # path has executed an ORIGIN (the function read tx.origin). Using
+        # tx.origin in an authorization check is unsafe (phishing-relay attack).
+        # Lives on the machine state so it propagates across path forks.
+        self.origin_loaded: bool = False
+        # Set once this path has been flagged for a tx.origin guard, so the same
+        # guard is reported exactly once per path rather than on every
+        # subsequent instruction (the origin constraint persists down the path).
+        self.tx_origin_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -74,6 +83,8 @@ class MachineState:
         new.call_checkpoint = self.call_checkpoint
         new.sloads_before_call = set(self.sloads_before_call)
         new.caller_loaded = self.caller_loaded
+        new.origin_loaded = self.origin_loaded
+        new.tx_origin_flagged = self.tx_origin_flagged
         return new
 
     def fork_world(self) -> None:
