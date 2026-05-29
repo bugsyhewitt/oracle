@@ -38,6 +38,7 @@ _TITLE = {
     "dos_failed_call": "DoS with Failed Call (SWC-113)",
     "timestamp_dependence": "Block values as a proxy for time (SWC-116)",
     "unprotected_ether_withdrawal": "Unprotected Ether Withdrawal (SWC-105)",
+    "block_gas_limit_dos": "DoS With Block Gas Limit (SWC-128)",
 }
 
 # Highest-to-lowest banding order used in the summary block.

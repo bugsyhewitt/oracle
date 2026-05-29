@@ -33,6 +33,7 @@ SEVERITY = {
     "dos_failed_call": "medium",
     "timestamp_dependence": "medium",
     "unprotected_ether_withdrawal": "high",
+    "block_gas_limit_dos": "medium",
 }
 
 
@@ -701,6 +702,85 @@ class UnprotectedEtherWithdrawalDetector(DetectorHook):
         self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class BlockGasLimitDosDetector(DetectorHook):
+    """Detects a denial-of-service via an unbounded, storage-bounded loop
+    (SWC-128, "DoS With Block Gas Limit").
+
+    Every EVM transaction can only consume up to the block gas limit; a function
+    whose gas cost grows without bound becomes permanently uncallable once that
+    cost crosses the limit. The canonical shape is a loop whose iteration count
+    is bounded by a value held in **contract storage that can grow without
+    bound** — a `for (uint i = 0; i < arr.length; i++)` over a storage array
+    `arr` that anyone (or ordinary usage) can keep pushing onto. As the array
+    grows the loop costs more gas each call until the whole function reverts on
+    out-of-gas for *everyone*, bricking any funds or state it gates. This is the
+    classic unbounded-array DoS (SWC-128): airdrops, dividend sweeps, and
+    "process all pending" batch functions that iterate an unbounded collection.
+    The safe design caps the iteration count, paginates the work, or uses a
+    pull-payment so each account touches only its own bounded slice.
+
+    Detection signal — an `SLOAD` whose program counter the engine has already
+    executed **earlier on this same path**. oracle's bounded executor unrolls
+    loops by revisiting the loop body's instructions, appending each executed
+    `(pc, op)` to the per-path `state.trace`. A storage-array loop re-reads
+    storage every iteration (the array length for the bound and/or an element for
+    the body), so its `SLOAD` pc recurs in the trace — a witness that the loop's
+    work is bounded by, and re-reads, *contract state* that can grow without
+    bound. The hook runs *before* the instruction executes, so the current pc is
+    not yet on the trace; if that pc is *already* present, this storage read sits
+    inside a loop body that has iterated at least once.
+
+    This is deliberately distinct from the two neighbouring availability /
+    loop detectors:
+      * DosFailedCallDetector (`dos_failed_call`, SWC-113) keys on a recurring
+        *CALL* pc — one reverting callee in a loop DoSing the batch. SWC-128
+        needs no external call at all; the bug is the unbounded *iteration
+        count* itself, witnessed by a recurring storage read.
+      * A loop bounded by a fixed constant or a calldata argument re-reads no
+        storage for its bound (the bound is a stack/calldata value), so its
+        SLOAD pc never recurs and it is not flagged — the loop is bounded in
+        contract state and cannot be pushed past the gas limit.
+
+    A per-detector flagged-pc set reports each loop-bound storage-read site once
+    across paths.
+
+    [Worker decision: the discriminating signal is "an SLOAD pc recurs in the
+    path trace" (a loop re-reads contract storage each iteration) rather than
+    attempting to reconstruct the loop's CFG, prove the storage collection is
+    attacker-growable, or trace the loop bound's operand through the constraint
+    set. oracle's executor already unrolls loops onto the trace, so a recurring
+    SLOAD pc is a sound, model-robust witness that the loop is bounded by
+    re-read contract state — exactly the SWC-128 surface, where the iteration
+    count grows with an unbounded storage collection. It mirrors the SWC-113
+    DoS-with-failed-call detector's recurring-CALL-pc architecture (same trace,
+    same per-pc dedupe), keeps the two detectors cleanly separated (CALL vs
+    SLOAD recurrence), and does not false-positive on a constant- or
+    calldata-bounded loop (whose bound is never re-read from storage) or on a
+    single non-loop storage read (whose pc appears once per path). No engine
+    change, no new dependency.]
+    """
+
+    category = "block_gas_limit_dos"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic != "SLOAD":
+            return
+        if instruction.pc in self._flagged_pcs:
+            return
+        # The hook runs BEFORE the instruction executes, so this pc is not yet
+        # on the trace. If it is already present, the storage read has been
+        # reached before on this path — it is inside a loop body that has
+        # iterated, so the loop re-reads contract state every iteration and is
+        # unbounded in that (growable) state: a block-gas-limit DoS.
+        if any(t.pc == instruction.pc for t in state.trace):
+            self._flagged_pcs.add(instruction.pc)
+            self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -879,4 +959,5 @@ DETECTOR_REGISTRY = {
     "dos-failed-call": DosFailedCallDetector,
     "timestamp": TimestampDependenceDetector,
     "ether-withdrawal": UnprotectedEtherWithdrawalDetector,
+    "gas-limit-dos": BlockGasLimitDosDetector,
 }

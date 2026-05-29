@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -365,6 +365,40 @@ entitled balance (`dos-failed-call-safe.sol`), are **not** flagged. A provably
 zero-value call (a pure data call) is also skipped — there is no ether to steal.
 `DELEGATECALL` / `STATICCALL` cannot move the contract's own balance and are out
 of scope.
+
+### `gas-limit-dos` — DoS with block gas limit / unbounded loop (SWC-128)
+
+```bash
+oracle --contract tests/fixtures/gas-limit-dos-vuln.sol \
+       --input-type sol --check gas-limit-dos --max-depth 24 --format json
+```
+
+Flags a loop whose body re-reads **contract storage** every iteration while its
+trip count is not bounded by a constant (`category: "block_gas_limit_dos"`,
+severity `medium`). Every EVM transaction can only consume up to the block gas
+limit, so a function whose gas cost grows without bound — iterating an unbounded
+storage array, an unchecked caller-supplied count, or a monotonically growing
+collection while doing per-iteration storage work — eventually exceeds the limit
+and can **never** be executed again, permanently bricking any funds or state it
+gates. This is the classic unbounded-operation DoS (SWC-128, "DoS With Block Gas
+Limit"): airdrops, dividend sweeps, and "process all pending" batch functions
+over a collection that can grow. `gas-limit-dos-vuln.sol`'s `processN(n)` loops
+`n` times (no upper bound) and reads + writes storage every iteration, so it is
+flagged.
+
+The discriminating signal is that an `SLOAD`'s program counter is reached **more
+than once on a single path**: oracle's bounded executor unrolls loops by
+revisiting the loop body, so a recurring SLOAD pc witnesses a loop that re-reads
+contract state every iteration — the unbounded-operation surface. This is
+distinct from `dos-failed-call` (SWC-113), which keys on a recurring *CALL* pc
+(one reverting callee DoSing a batch); SWC-128 needs no external call at all, and
+the `gas-limit-dos-vuln.sol` fixture (which makes no call) is flagged by
+`gas-limit-dos` but **not** by `dos-failed-call`. A loop bounded by a fixed
+constant / range-checked argument whose body does **not** re-read storage
+(`gas-limit-dos-safe.sol`'s `sumN(n)` with `require(n <= 100)` and a local-only
+accumulator) never recurs an SLOAD pc and is **not** flagged, and a single,
+non-loop storage read reaches its SLOAD pc at most once per path and is likewise
+clean.
 
 ### bytecode input (no solc)
 

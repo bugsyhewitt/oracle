@@ -757,6 +757,95 @@ fixtures. No engine or VM change.
 
 ---
 
+### 20. Block-gas-limit DoS detector (SWC-128) ✅ IMPLEMENTED (Phase 2, Rotation 19)
+
+**Status:** Shipped. Added `BlockGasLimitDosDetector` (category
+`block_gas_limit_dos`, severity `medium`, CLI token `gas-limit-dos`) — oracle's
+fourteenth detector and the seventh new *bug class* of Phase 2 (after the
+Rotation 13 tx.origin, Rotation 14 delegatecall, Rotation 15 unchecked-call,
+Rotation 16 DoS-with-failed-call, Rotation 17 timestamp-dependence, and Rotation
+18 unprotected-ether-withdrawal detectors). It flags a loop whose body re-reads
+**contract storage** every iteration while its trip count is not bounded by a
+constant — SWC-128, "DoS With Block Gas Limit." Every EVM transaction can only
+consume up to the block gas limit, so a function whose gas cost grows without
+bound (iterating an unbounded storage array, an unchecked caller-supplied count,
+or a monotonically growing collection while doing per-iteration storage work)
+eventually exceeds the limit and can never be executed again, permanently
+bricking any funds or state it gates — the classic airdrop / dividend-sweep /
+"process all pending" unbounded-operation DoS.
+
+The discriminating signal reuses the exact architecture of the SWC-113
+DoS-with-failed-call detector (Rotation 16), applied to a different opcode: an
+`SLOAD` whose program counter the engine has already executed earlier on the
+same path. oracle's bounded executor unrolls loops by revisiting the loop body
+and appending each executed `(pc, op)` to `state.trace`, so a recurring SLOAD pc
+witnesses a loop that re-reads contract state every iteration — the
+unbounded-operation surface. The hook runs *before* the instruction executes, so
+a current pc already present on the trace means this storage read sits inside a
+loop body that has iterated. A per-detector flagged-pc set reports each
+loop-bound storage-read site once across paths. No engine change, no new
+dependency — the trace machinery the SWC-113 detector already relies on produces
+the signal for free.
+
+This is deliberately kept distinct from the two neighbouring loop / availability
+detectors. `dos_failed_call` (SWC-113) keys on a recurring *CALL* pc — one
+reverting callee in a loop DoSing a batch; SWC-128 needs no external call at all,
+and the vulnerable fixture (which makes no call) is flagged by `gas-limit-dos`
+but **not** by `dos-failed-call` (a dedicated test pins this separation). A loop
+bounded by a fixed constant / range-checked argument whose body does not re-read
+storage never recurs an SLOAD pc, and a single non-loop storage read reaches its
+pc once per path — both are clean. The report `_TITLE` map gains `DoS With Block
+Gas Limit (SWC-128)` so h1md headings and SARIF rule descriptions render; medium
+severity is already handled by the SARIF level / security-severity maps. Tests:
+`tests/test_gas_limit_dos.py` (18 default + 2 slow real-Z3) cover registry/CLI
+registration, severity, fixture opcode + loop presence, vulnerable-flagged /
+safe-clean at both the detector and end-to-end layers, the per-storage-read-site
+dedupe, a depth-too-shallow-to-unroll case (pins the signal on the loop
+*recurrence*, not the storage read), two false-positive guards (a single non-loop
+storage read and a contract whose paths do not re-read storage in a loop), the
+explicit distinct-from-SWC-113 separation, participation in an `all`-checks run,
+and h1md + SARIF rendering. Two new fixtures: `gas-limit-dos-vuln.sol`
+(`processN(uint256 n)` loops `n` times — an unbounded calldata count — and reads
++ writes storage `total`/`step` each iteration, so the SLOAD pc recurs and, since
+the trip count is a calldata argument, the loop-entered path stays satisfiable
+rather than collapsed by oracle's all-zero initial storage) and
+`gas-limit-dos-safe.sol` (`sumN(n)` with `require(n <= 100)` loops over a
+constant-ceiling count with a local-only accumulator — the loop / JUMPI back-edge
+is still present, so the test proves the detector keys on the loop *re-reading
+storage*, not on the loop opcode).
+
+**Why it matters:** Block-gas-limit DoS is a named SWC entry (SWC-128), on every
+audit checklist, and the root cause of a long tail of permanently-stuck-funds and
+unprocessable-queue incidents (the unbounded-array / unbounded-loop class). It
+was a visible gap in oracle's detector set — the only prior availability detector
+(SWC-113) keys on a loop-bound *call*, leaving the more common callless
+unbounded-operation surface uncovered. It maps cleanly onto oracle's existing
+architecture — the same trace-recurrence machinery the SWC-113 detector uses,
+applied to SLOAD instead of CALL — so it adds a distinct bug class with no engine
+refactor and no new dependency. Selected for Rotation 19 because the numbered
+roadmap items 1-19 are all shipped or blocked (#7 counterexample validator needs
+`py-evm`, #10 Python 3.14 needs upstream `coincurve` 3.14 wheels), so a new
+self-contained detector — the same play that shipped Rotations 13-18 — is the
+highest-value unblocked work. SWC-128 was previously deferred in Rotation 18 as
+overlapping the SWC-113 loop machinery; on closer assessment the overlap is the
+*machinery* (the trace-recurrence walk), not the *bug class* — the two detectors
+key on different opcodes (CALL vs SLOAD) and the vulnerable fixture here makes no
+call at all, so SWC-128 covers a surface SWC-113 cannot reach. SWC-106
+(unprotected SELFDESTRUCT) is already covered by the access-control detector's
+unguarded-SELFDESTRUCT sink and the reachable-selfdestruct detector; SWC-131
+(restrictive gas) was rejected earlier as fragile (the 2300-gas literal rarely
+survives as a concrete operand in oracle's coarse model); SWC-111 (deprecated
+functions) and SWC-119 (state-variable shadowing) are source-AST-linter concerns
+with no distinguishing bytecode signal. SWC-128 is the highest-value *uncovered*
+candidate that fits oracle's symbolic-execution model. This is the assessed
+"#20+" gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a recurring SLOAD pc in
+the per-path trace (reusing the SWC-113 trace-recurrence pattern), a report title,
+two fixtures. No engine or VM change.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on
