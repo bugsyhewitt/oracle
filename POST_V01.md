@@ -674,6 +674,89 @@ handler, a report title, two fixtures.
 
 ---
 
+### 19. Unprotected-ether-withdrawal detector (SWC-105) ✅ IMPLEMENTED (Phase 2, Rotation 18)
+
+**Status:** Shipped. Added `UnprotectedEtherWithdrawalDetector` (category
+`unprotected_ether_withdrawal`, severity `high`, CLI token `ether-withdrawal`) —
+oracle's thirteenth detector and the sixth new *bug class* of Phase 2 (after the
+Rotation 13 tx.origin, Rotation 14 delegatecall, Rotation 15 unchecked-call,
+Rotation 16 DoS-with-failed-call, and Rotation 17 timestamp-dependence
+detectors). It flags a value-forwarding call (`CALL` / `CALLCODE`) reached on a
+path with **no access-control guard** — SWC-105, "Unprotected Ether Withdrawal."
+A public `withdraw()` / `sweep()` / `claim()` that forwards the contract's ether
+(`transfer`/`send`/a value-bearing low-level `call`) without a
+`require(msg.sender == owner)` / `onlyOwner` gate lets *any* address drain the
+contract — the Parity-wallet `initWallet`+`withdraw` class and a long tail of
+"anyone can empty the contract" stuck-/stolen-funds incidents.
+
+The discriminating signal reuses the `_guarded_by_caller` constraint walk that
+the access-control detector (Rotation, #5) already uses for `caller`: the
+value-forwarding call is reached on a path whose accumulated constraints **never
+branch on the caller's identity**. A genuine `require(msg.sender == owner)` guard
+compiles to a comparison on the symbolic `caller` leaf feeding a JUMPI, so a
+guarded path carries `caller` in a constraint; an unguarded path leaves it
+entirely free. Only `CALL` / `CALLCODE` are inspected — they alone can forward
+the contract's own ether; `DELEGATECALL` / `STATICCALL` cannot move the balance
+and are out of scope. A *provably concrete-zero* `value` operand (a pure data
+call) is skipped — there is no ether to steal — but a value derived from a
+storage balance that collapses to oracle's all-zero initial storage is **not**
+treated as proof of a zero-value call (the same model-robust reading the
+reentrancy and DoS detectors use). A per-detector flagged-pc set reports each
+unprotected call site once across paths. No engine change, no new dependency.
+
+This is deliberately distinct from the two neighbouring detectors. EtherLeak
+(`unconstrained_ether_transfer`) fires on a call whose *recipient* is
+attacker-controlled (a symbolic `to`); SWC-105 fires even when the recipient is
+`msg.sender` — the bug is the **absent access control**, not the recipient, so a
+`withdraw()` that pays the caller an unentitled share has a perfectly ordinary
+`to == caller` recipient yet is still an unprotected drain. AccessControlEscalation
+keys on the privileged sinks SELFDESTRUCT / DELEGATECALL and the
+`owner = msg.sender` SSTORE; SWC-105 keys on an ordinary value-forwarding CALL, a
+different sink class. The report `_TITLE` map gains `Unprotected Ether Withdrawal
+(SWC-105)` so h1md headings and SARIF rule descriptions render properly; high
+severity is already handled by the SARIF level / security-severity maps. Tests:
+`tests/test_ether_withdrawal.py` (18 default + 2 slow real-Z3) cover
+registry/CLI registration, severity, the `_VALUE_CALL_OPS` scope, fixture opcode
++ branch presence, vulnerable-flagged / safe-clean at both the detector and
+end-to-end layers, the per-call-site dedupe, and three false-positive guards (a
+contract that never forwards ether, a pull-payment paying only the caller's own
+balance, and a caller-guarded withdrawal), participation in an `all`-checks run,
+and h1md + SARIF rendering. Two new fixtures: `ether-withdrawal-vuln.sol`
+(`withdraw()` sends `address(this).balance` to `msg.sender` with no owner check —
+the recipient is an ordinary `msg.sender`, so the test proves the detector keys
+on the missing caller guard, not an attacker-controlled recipient) and
+`ether-withdrawal-safe.sol` (`withdraw()` forwards the balance only after
+`require(msg.sender == owner)` — CALL still present, so the test proves the
+detector keys on the *missing caller guard*, not the value-forwarding opcode).
+
+**Why it matters:** Unprotected ether withdrawal is a named SWC entry (SWC-105),
+on every audit checklist, and the root cause of some of the largest fund-loss
+incidents in EVM history (the Parity multisig freeze/drain class). It maps cleanly
+onto oracle's existing architecture — the same `_guarded_by_caller` constraint
+walk the access-control and tx.origin detectors use, applied to a value-forwarding
+call sink — so it adds a high-severity bug class with no engine refactor and no
+new dependency. Selected for Rotation 18 because the numbered roadmap items 1-18
+are all shipped or blocked (#7 counterexample validator needs `py-evm`, #10 Python
+3.14 needs upstream `coincurve` 3.14 wheels), so a new self-contained detector —
+the same play that shipped Rotations 13-17 — is the highest-value unblocked work.
+SWC-128 (DoS by block gas limit — loops over unbounded arrays) was considered and
+deferred: it overlaps the existing loop-recurrence machinery of the SWC-113
+DoS-with-failed-call detector and the highest-value, lowest-overlap availability
+case is already covered. SWC-111 (deprecated functions — `suicide`/`sha3`/`throw`)
+was rejected as a poor fit for a bytecode/symbolic tool: those source-level
+deprecations compile to the *same* opcodes (SELFDESTRUCT / KECCAK256 / INVALID)
+modern code emits, so bytecode cannot distinguish them — a source-AST linter's
+job, not a symbolic executor's. SWC-119 (shadowing state variables) is a pure
+source-level naming concept with no bytecode signal at all. SWC-105 is the
+highest-value *uncovered* candidate that fits oracle's symbolic-execution model.
+This is the assessed "#19+" gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a value-forwarding call
+on a caller-unconstrained path (reusing `_guarded_by_caller`), a report title, two
+fixtures. No engine or VM change.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

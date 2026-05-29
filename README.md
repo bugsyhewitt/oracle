@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -334,6 +334,37 @@ safe.sol`), or storing it for a log — never enters a JUMPI condition and is
 randomness oracle, never a raw block value. (`BLOCKHASH` is intentionally out of
 scope here: past block hashes are a distinct construct; SWC-116's named surface
 is the time/number proxy.)
+
+### `ether-withdrawal` — unprotected ether withdrawal (SWC-105)
+
+```bash
+oracle --contract tests/fixtures/ether-withdrawal-vuln.sol \
+       --input-type sol --check ether-withdrawal --format json
+```
+
+Flags a value-forwarding call (`CALL` / `CALLCODE`) reached on a path with **no
+access-control guard** (`category: "unprotected_ether_withdrawal"`, severity
+`high`). A public `withdraw()` / `sweep()` / `claim()` that forwards the
+contract's ether (`transfer`/`send`/a value-bearing low-level `call`) without a
+`require(msg.sender == owner)` / `onlyOwner` gate lets *any* address drain the
+contract — the canonical SWC-105 "anyone can empty the contract" bug (the
+Parity-wallet class and a long tail of stuck-/stolen-funds incidents).
+`ether-withdrawal-vuln.sol`'s `withdraw()` sends `address(this).balance` to
+`msg.sender` with no owner check and is flagged.
+
+The discriminating signal is that the value-forwarding call is reached on a path
+whose accumulated constraints **never branch on the caller's identity**: a
+genuine `require(msg.sender == owner)` guard compiles to a comparison on the
+symbolic `caller` leaf feeding a JUMPI, so a guarded path carries `caller` in a
+constraint; an unguarded path leaves it entirely free. This is distinct from
+`ether-leak`, which flags a call whose *recipient* is attacker-controlled — SWC-105
+fires even when the recipient is `msg.sender`, because the bug is the **absent
+access control**, not the recipient. A withdrawal gated on `msg.sender`
+(`ether-withdrawal-safe.sol`), and a pull-payment that pays only the caller's own
+entitled balance (`dos-failed-call-safe.sol`), are **not** flagged. A provably
+zero-value call (a pure data call) is also skipped — there is no ether to steal.
+`DELEGATECALL` / `STATICCALL` cannot move the contract's own balance and are out
+of scope.
 
 ### bytecode input (no solc)
 

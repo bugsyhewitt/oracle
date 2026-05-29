@@ -37,6 +37,7 @@ _TITLE = {
     "unchecked_call_return": "Unchecked Call Return Value (SWC-104)",
     "dos_failed_call": "DoS with Failed Call (SWC-113)",
     "timestamp_dependence": "Block values as a proxy for time (SWC-116)",
+    "unprotected_ether_withdrawal": "Unprotected Ether Withdrawal (SWC-105)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
