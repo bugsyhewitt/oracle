@@ -1053,6 +1053,91 @@ a report title, two fixtures. No engine refactor, no new dependency.
 
 ---
 
+### 24. Unprotected-SELFDESTRUCT detector (SWC-106) ✅ IMPLEMENTED (Phase 2, Rotation 27)
+
+**Status:** Shipped. Added `UnprotectedSelfdestructDetector` (category
+`unprotected_selfdestruct`, severity `high`, CLI token `unprotected-selfdestruct`).
+It flags a `SELFDESTRUCT` reached on a path whose accumulated constraints **never
+branch on the caller's identity** — SWC-106, "Unprotected SELFDESTRUCT
+Instruction." A public `kill()` / `close()` / `destroy()` that runs
+`selfdestruct(target)` with no `require(msg.sender == owner)` / `onlyOwner` gate
+lets *any* address destroy the contract and forward its entire balance to an
+arbitrary recipient — the Parity multisig wallet-library `kill()` incident that
+froze ~$280M of user funds, and a long tail of "anyone can destroy the contract"
+bugs. The discriminating signal is the **absent caller guard**: a genuine
+`require(msg.sender == owner)` compiles to a comparison on the symbolic `caller`
+leaf feeding a JUMPI, so a guarded path carries `caller` in a path constraint and
+an unguarded path leaves it entirely free, reusing the `_guarded_by_caller`
+constraint walk the access-control, tx.origin, and SWC-105 ether-withdrawal
+detectors already share. A per-detector flagged-pc set reports each unprotected
+SELFDESTRUCT site once across paths.
+
+This is deliberately distinct from the two neighbouring SELFDESTRUCT-aware
+detectors. The `selfdestruct` detector (`reachable_selfdestruct`) fires on **any**
+reachable SELFDESTRUCT — including one correctly gated behind
+`require(msg.sender == owner)` — answering "is it destructible at all?"; SWC-106
+is the narrower "can an *unauthorised* caller destroy it?" question and stays
+silent on a properly owner-gated `kill()`. The `access-control`
+(`access_control_escalation`) detector also flags the unguarded case but folds it
+into a broad ownership/privilege-escalation category alongside `owner = msg.sender`
+writes and unguarded DELEGATECALL; SWC-106 reports under its own
+`unprotected_selfdestruct` category / SWC-106 title so a triage team can band and
+suppress it independently. The report `_TITLE` map gains `Unprotected SELFDESTRUCT
+(SWC-106)` so h1md headings and SARIF rule descriptions render properly; high
+severity is already handled by the SARIF level / security-severity maps. Tests:
+`tests/test_unprotected_selfdestruct.py` (16 default + 2 slow real-Z3) cover
+registry/CLI registration, severity, fixture opcode + branch presence,
+vulnerable-flagged / safe-clean at both the detector and end-to-end layers, the
+per-site dedupe, the defining distinction from the broad `reachable_selfdestruct`
+detector on the *safe* fixture (the broad detector flags it; SWC-106 does not), a
+false-positive guard on a contract that never self-destructs, participation in an
+`all`-checks run, and h1md + SARIF rendering. Two new fixtures:
+`unprotected-selfdestruct-vuln.sol` (`kill(target)` self-destructs with no owner
+check — flagged) and `unprotected-selfdestruct-safe.sol` (`kill(target)`
+self-destructs only after `require(msg.sender == owner)` — SELFDESTRUCT still
+present, so the test proves the detector keys on the *missing caller guard*, not
+the opcode).
+
+**Why it matters:** Unprotected SELFDESTRUCT is a named SWC entry (SWC-106), on
+every audit checklist, and the root cause of one of the largest fund-loss
+incidents in EVM history (the Parity multisig wallet-library freeze). It maps
+cleanly onto oracle's existing architecture — the same `_guarded_by_caller`
+constraint walk the access-control, tx.origin, and SWC-105 detectors use, applied
+to the SELFDESTRUCT sink — so it adds a high-severity named bug class with no
+engine refactor and no new dependency. Selected for Rotation 27 because the roster
+called for assessing SWC-107 (reentrancy variants) or SWC-106 (unprotected
+self-destruct) as the next detector after SWC-101 integer-underflow shipped (and
+noted SWC-105 already shipped in R18, SWC-123 assessed infeasible on the coarse
+memory model). SWC-106 is the higher-feasibility fit: it reuses the proven
+caller-guard constraint walk verbatim with zero engine change, exactly mirroring
+the SWC-105 carve-out (a named SWC entry deserves its own category/title even when
+a broader detector overlaps), whereas a new SWC-107 reentrancy *variant* (e.g.
+cross-function or cross-transaction reentrancy beyond the existing single-function
+CEI detector) would require cross-function / cross-transaction state modelling that
+is heavier and more false-positive-prone over oracle's coarse memory model. This
+is the same self-contained-detector play that shipped Rotations 13-25.
+
+**Verification of prior state (per roster instruction):** confirmed before
+implementing that no dedicated SWC-106 detector existed. A repo-wide grep for
+`SWC-106`, `unprotected self-destruct`, and `unprotected-selfdestruct` returned
+only (a) a stale 2-line note in the Rotation 16 (#17) assessment that had
+*considered and rejected* SWC-106 as "already covered by reachable-selfdestruct +
+access-control" — the identical overlap reasoning that was later overridden when
+SWC-105 was carved out as its own detector in Rotation 18 — and (b) the
+access-control detector's unguarded-SELFDESTRUCT sink (a broad escalation
+category, not a dedicated SWC-106 category). Neither the `reachable_selfdestruct`
+detector (fires on *any* reachable SELFDESTRUCT, including guarded ones) nor the
+`access_control_escalation` detector (broad category) reports SWC-106 as its own
+triageable bug class, so the gap was genuinely open. SWC-105 was confirmed already
+shipped (`UnprotectedEtherWithdrawalDetector`), so the carve-out precedent it set
+directly justified this one.
+
+**Estimated effort:** Low. One detector class keying on an unguarded SELFDESTRUCT
+(reusing the `_guarded_by_caller` constraint walk), a report title, two fixtures.
+No engine refactor, no new dependency.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

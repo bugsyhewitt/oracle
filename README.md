@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -198,6 +198,39 @@ oracle --contract tests/fixtures/reachable-selfdestruct.sol \
 
 Finds the unguarded `SELFDESTRUCT` (`category: "reachable_selfdestruct"`) that
 any caller can reach.
+
+### `unprotected-selfdestruct` — unprotected SELFDESTRUCT (SWC-106)
+
+```bash
+oracle --contract tests/fixtures/unprotected-selfdestruct-vuln.sol \
+       --input-type sol --check unprotected-selfdestruct --format json
+```
+
+Flags a `SELFDESTRUCT` reached on a path with **no access-control guard**
+(`category: "unprotected_selfdestruct"`, severity `high`). A public `kill()` /
+`close()` / `destroy()` that runs `selfdestruct(target)` without a
+`require(msg.sender == owner)` / `onlyOwner` gate lets *any* address destroy the
+contract and sweep its entire balance — the canonical SWC-106 bug, the Parity
+multisig wallet-library `kill()` incident that froze ~$280M of user funds.
+`unprotected-selfdestruct-vuln.sol`'s `kill(target)` self-destructs with no owner
+check and is flagged.
+
+The discriminating signal is that the `SELFDESTRUCT` is reached on a path whose
+accumulated constraints **never branch on the caller's identity**: a genuine
+`require(msg.sender == owner)` guard compiles to a comparison on the symbolic
+`caller` leaf feeding a JUMPI, so a guarded path carries `caller` in a
+constraint; an unguarded path leaves it entirely free.
+
+This is deliberately narrower than the `selfdestruct` check, which flags **any**
+reachable `SELFDESTRUCT` — including one correctly gated behind
+`require(msg.sender == owner)`. `selfdestruct` answers "is this destructible at
+all?"; `unprotected-selfdestruct` answers "can an *unauthorised* caller destroy
+it?", and it stays silent on a properly owner-gated `kill()`
+(`unprotected-selfdestruct-safe.sol` is flagged by `selfdestruct` but **not** by
+`unprotected-selfdestruct`). It also reports under its own SWC-106 category /
+title rather than folding into the broad `access-control` escalation category, so
+a triage team can band and suppress SWC-106 independently — the same carve-out as
+SWC-105 (`ether-withdrawal`) versus `access-control`.
 
 ### `ether-leak` — unconstrained ether transfer
 

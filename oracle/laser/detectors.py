@@ -24,6 +24,7 @@ SEVERITY = {
     "integer_overflow": "high",
     "integer_underflow": "high",
     "reachable_selfdestruct": "high",
+    "unprotected_selfdestruct": "high",
     "unconstrained_ether_transfer": "high",
     "arbitrary_storage_write": "high",
     "reentrancy": "high",
@@ -813,6 +814,88 @@ class UnprotectedEtherWithdrawalDetector(DetectorHook):
         self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class UnprotectedSelfdestructDetector(DetectorHook):
+    """Detects an unprotected SELFDESTRUCT instruction (SWC-106, "Unprotected
+    SELFDESTRUCT Instruction").
+
+    `SELFDESTRUCT(target)` deletes the contract's code from chain and forwards
+    its **entire balance** to `target` in a single, irreversible operation. A
+    contract that reaches a `selfdestruct` from a **public** function with **no
+    access-control guard** lets *any* address destroy it and sweep its funds.
+    The canonical shape is a public `kill()` / `close()` / `destroy()` that calls
+    `selfdestruct(msg.sender)` (or an attacker-supplied address) with no
+    `require(msg.sender == owner)` / `onlyOwner` gate — the Parity multisig
+    wallet-library incident that bricked ~$280M of user funds when an
+    unauthenticated caller invoked the library's unprotected `kill()`. The safe
+    design gates every `selfdestruct` on the caller's authorisation.
+
+    Detection signal — a `SELFDESTRUCT` reached on a path whose accumulated
+    constraints **never branch on the caller's identity**. In oracle's bitvec
+    constraint model a genuine `require(msg.sender == owner)` guard compiles to a
+    comparison feeding a JUMPI, so the symbolic `caller` leaf appears in a path
+    constraint; a missing/ineffective guard leaves `caller` entirely
+    unconstrained. So a SELFDESTRUCT on a `caller`-unconstrained path is the
+    unprotected destruction.
+
+    This is deliberately distinct from the two neighbouring SELFDESTRUCT-aware
+    detectors:
+      * ReachableSelfdestructDetector (`reachable_selfdestruct`) fires on **any**
+        reachable SELFDESTRUCT — including one perfectly gated behind
+        `require(msg.sender == owner)`. That is the "is this destructible at
+        all?" question; SWC-106 is the narrower "can an *unauthorised* caller
+        destroy it?" question, and a triage team wants to band and suppress the
+        two independently. A correctly owner-gated `kill()` is a true
+        `reachable_selfdestruct` but is **not** SWC-106, and this detector stays
+        silent on it.
+      * AccessControlEscalationDetector (`access_control_escalation`) also flags
+        an unguarded SELFDESTRUCT, but bundles it into a broad ownership /
+        privilege-escalation category alongside `owner = msg.sender` writes and
+        unguarded DELEGATECALL. SWC-106 is a named registry entry with its own
+        remediation ("guard the selfdestruct"), so it reports under its own
+        `unprotected_selfdestruct` category / SWC-106 title for clean,
+        per-bug-class triage — exactly the precedent set when SWC-105
+        (unprotected ether withdrawal) was carved out as its own detector even
+        though access-control already overlapped the value-forwarding-CALL sink.
+
+    A per-detector flagged-pc set reports each unprotected SELFDESTRUCT site once
+    across paths.
+
+    [Worker decision: the discriminating signal is "SELFDESTRUCT on a
+    caller-unconstrained path", reusing the `_guarded_by_caller` constraint walk
+    that AccessControlEscalation, tx.origin, and SWC-105 ether-withdrawal already
+    use for `caller` — no engine change, no new dependency, no new VM symbol or
+    MachineState field. The two existing SELFDESTRUCT detectors are individually
+    insufficient for SWC-106: `reachable_selfdestruct` flags every reachable
+    destruction (it would mark a correctly owner-gated `kill()` as a finding,
+    over-reporting the SWC-106 surface), and `access_control_escalation` folds
+    the unguarded case into a broad escalation category that a triage team cannot
+    band or suppress as SWC-106 specifically. Carving out a dedicated
+    caller-guard-keyed detector mirrors the SWC-105 carve-out exactly: a named
+    SWC entry deserves its own category / title even when a broader detector
+    overlaps. The detector keys on the missing caller guard rather than the
+    SELFDESTRUCT's target operand (which an EtherLeak-style "symbolic recipient"
+    test would key on) because the SWC-106 property is the *absent access
+    control*, not the recipient — a `kill()` that destructs to a hard-coded
+    address is still an unprotected drain.]
+    """
+
+    category = "unprotected_selfdestruct"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic != "SELFDESTRUCT":
+            return
+        if _guarded_by_caller(state, vm):
+            return  # the path branched on msg.sender — access control is present
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 class BlockGasLimitDosDetector(DetectorHook):
     """Detects a denial-of-service via an unbounded, storage-bounded loop
     (SWC-128, "DoS With Block Gas Limit").
@@ -1402,6 +1485,7 @@ DETECTOR_REGISTRY = {
     "overflow": IntegerOverflowDetector,
     "underflow": IntegerUnderflowDetector,
     "selfdestruct": ReachableSelfdestructDetector,
+    "unprotected-selfdestruct": UnprotectedSelfdestructDetector,
     "ether-leak": EtherLeakDetector,
     "storage-write": StorageWriteDetector,
     "reentrancy": ReentrancyDetector,
