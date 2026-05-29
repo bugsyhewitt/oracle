@@ -605,13 +605,28 @@ class SymbolicVM:
         state.pc = inst.pc + 1
         return [state]
 
+    def _op_gasprice(self, state, inst):
+        # GASPRICE pushes `tx.gasprice`. Record the read so the
+        # TransactionOrderDependenceDetector can tell "the function looked at the
+        # gas price" apart from functions that never touch it. Branching control
+        # flow on `tx.gasprice` is a transaction-order-dependence smell (SWC-114):
+        # the gas price is set by the transaction sender and is precisely the
+        # lever used to reorder transactions within a block, so gating logic on it
+        # is a decision driven by a value an attacker freely controls and that
+        # governs ordering (a gas-price ceiling meant to deter front-running, or a
+        # gas-price-derived outcome). The stable, named `gasprice` symbol is pushed
+        # so a later guard branching on it is recognisable in the path constraints.
+        state.gasprice_loaded = True
+        state.push(symbol_factory.BitVecSym(self._sym("gasprice"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
     def _generic_env(self, state, inst, name):
         state.push(symbol_factory.BitVecSym(self._sym(name), 256))
         state.pc = inst.pc + 1
         return [state]
 
     _op_gas = lambda self, s, i: self._generic_env(s, i, "gas")
-    _op_gasprice = lambda self, s, i: self._generic_env(s, i, "gasprice")
     _op_gaslimit = lambda self, s, i: self._generic_env(s, i, "gaslimit")
     _op_coinbase = lambda self, s, i: self._generic_env(s, i, "coinbase")
     _op_difficulty = lambda self, s, i: self._generic_env(s, i, "difficulty")

@@ -37,6 +37,7 @@ SEVERITY = {
     "extcodesize_caller_check": "medium",
     "strict_balance_equality": "medium",
     "blockhash_randomness": "medium",
+    "transaction_order_dependence": "medium",
 }
 
 
@@ -1030,6 +1031,101 @@ class BlockhashRandomnessDetector(DetectorHook):
                 )
 
 
+class TransactionOrderDependenceDetector(DetectorHook):
+    """Detects control flow that depends on `tx.gasprice` (SWC-114, "Transaction
+    Order Dependence").
+
+    The order in which transactions execute inside a block is **not** chosen by
+    the contract — it is chosen by the block proposer / searcher, who orders
+    transactions by fee (and can insert, drop, or reorder them). A contract whose
+    outcome depends on transaction ordering is exposed to front-running and
+    sandwich attacks: an observer watching the mempool can place their own
+    transaction *ahead of* a victim's by bidding a higher `tx.gasprice` (a
+    priority fee), or *behind* it, to capture value — the classic
+    approve/transferFrom race, the DEX sandwich, and the "first claimer wins" gas
+    auction. The single most direct on-chain signal of this exposure is a
+    contract that **branches control flow on `tx.gasprice` itself**: either a
+    misguided gas-price ceiling meant to deter front-running
+    (`require(tx.gasprice <= maxGasPrice)` — itself trivially satisfiable and a
+    smell that the author knows ordering matters), or an outcome derived from the
+    gas price (`if (tx.gasprice > X) reward = ...`). `tx.gasprice` is set freely
+    by the transaction sender and is the exact lever that governs ordering, so
+    gating logic on it is a security decision driven by an attacker-controlled,
+    ordering-determining value. This is the SWC registry's named SWC-114. The
+    safe primitives are commit-reveal schemes, batch auctions, submarine sends,
+    or slippage bounds — never logic that trusts gas price or transaction order.
+
+    Detection signal — the contract **branched control flow on** the gas price:
+    a path constraint references the `gasprice` leaf. oracle's VM mints a stable
+    `gasprice` symbol for the GASPRICE opcode, and an `if (tx.gasprice ...)` /
+    `require(tx.gasprice ...)` guard compiles to a comparison feeding a JUMPI,
+    whose taken/not-taken constraint carries the `gasprice` term. A contract that
+    reads `tx.gasprice` for a non-control-flow purpose (storing it, emitting it,
+    returning it, refunding it) never produces such a constraint, so this keys on
+    the *decision* use specifically rather than any GASPRICE execution.
+
+    The detector fires once per path. The gasprice-guard constraint persists for
+    the remainder of the path, so a per-path `gasprice_flagged` latch (carried on
+    the MachineState across forks) reports each gas-price-dependent path exactly
+    once instead of re-emitting on every subsequent instruction. A per-detector
+    set of already-flagged pcs additionally dedupes the same guard reached via
+    different paths.
+
+    This is deliberately distinct from the neighbouring chain-attribute
+    detectors. SWC-116 timestamp-dependence keys on `block.timestamp` /
+    `block.number` (a proposer-chosen *time* proxy), and SWC-120 blockhash keys on
+    `blockhash(n)` (a *randomness* source). SWC-114 is a different bug class — the
+    *ordering* of transactions, witnessed here by a gas-price-gated branch — with
+    its own remediation (commit-reveal / batch auctions rather than "don't use
+    time as a deadline" or "don't use a block hash for entropy"). Keeping the
+    detectors separate keeps each keyed to one bug class and one SWC id.
+
+    [Worker decision: keying on the `gasprice` symbol appearing in the path
+    constraints (control flow branched on tx.gasprice) mirrors how
+    TimestampDependenceDetector keys on the block-value symbol,
+    BlockhashRandomnessDetector keys on the `blockhash` family, and
+    TxOriginAuthDetector keys on `origin`, and reuses the same prefix AST-walk
+    (`_ast_mentions_prefix`, which also matches the epoch-prefixed `gasprice` form
+    a later transaction would mint). It is sound for the canonical
+    `require(tx.gasprice <= max)` / `if (tx.gasprice ...)` ordering-dependent
+    patterns — the most direct, model-robust bytecode signal of SWC-114 exposure —
+    and does not false-positive on a contract that merely reads the gas price
+    without gating on it (a non-branching read never enters a JUMPI condition).
+    Adding a dedicated `_op_gasprice` that sets the per-path `gasprice_loaded`
+    latch (the opcode previously used the generic env handler) gives the detector
+    a cheap gate before its AST walk, mirroring the BLOCKHASH handler; the symbol
+    name is unchanged, so no other detector or report path is affected. No new
+    dependency.]
+    """
+
+    category = "transaction_order_dependence"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        # Only meaningful once the gas price has been read on this path. Cheap
+        # gate before the (more expensive) constraint AST walk.
+        if not state.gasprice_loaded:
+            return
+        if state.gasprice_flagged:
+            return  # this path's gas-price guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on the gas price (control flow gated on an attacker-set,
+        # ordering-determining quantity — the unsafe transaction-order-dependence
+        # pattern).
+        if any(_ast_mentions_prefix(c, "gasprice") for c in state.constraints):
+            state.gasprice_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -1212,4 +1308,5 @@ DETECTOR_REGISTRY = {
     "extcodesize-check": ExtcodesizeCallerCheckDetector,
     "strict-balance": StrictBalanceEqualityDetector,
     "blockhash-randomness": BlockhashRandomnessDetector,
+    "tx-order": TransactionOrderDependenceDetector,
 }
