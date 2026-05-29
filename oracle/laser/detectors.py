@@ -28,6 +28,7 @@ SEVERITY = {
     "reentrancy": "high",
     "access_control_escalation": "high",
     "tx_origin_authentication": "high",
+    "delegatecall_untrusted_callee": "high",
 }
 
 
@@ -341,6 +342,65 @@ class TxOriginAuthDetector(DetectorHook):
                 )
 
 
+class DelegatecallUntrustedDetector(DetectorHook):
+    """Detects `delegatecall` / `callcode` to an attacker-controllable target
+    (SWC-112, "Delegatecall to Untrusted Callee").
+
+    `DELEGATECALL` runs the callee's code in *this* contract's storage and
+    balance context: the callee can rewrite any storage slot (including the
+    owner slot) and move the contract's ether. If the call **target address**
+    is derived from untrusted input (a function argument, i.e. calldata) the
+    contract is letting an arbitrary attacker run arbitrary code against its own
+    state — the canonical Parity multisig wallet bug (SWC-112). `CALLCODE` shares
+    the same hijack surface (callee code in the caller's storage context).
+
+    This is distinct from the access-control detector, which flags an *unguarded*
+    privileged sink regardless of where the target comes from. Here the bug is
+    the **untrusted target itself**: even a perfectly access-controlled
+    `delegatecall(userSuppliedLib, ...)` is exploitable because the privileged
+    caller can be tricked into pointing at a malicious library, and any caller
+    who controls the target controls the contract.
+
+    Detection signal — the target address operand of the DELEGATECALL/CALLCODE
+    is **symbolic and derived from calldata**. The call's stack layout is
+    `gas, addr, argsOffset, argsLength, retOffset, retLength`, so the target is
+    the second word from the top (`stack[-2]`). A concrete target (a hard-coded
+    library address, or a delegatecall to an immutable implementation) is *not*
+    flagged: it is not attacker-controllable. A target read from storage that
+    only an owner can set is modelled as a fresh storage symbol, not a calldata
+    leaf, so it is likewise not flagged — keeping the detector to the specific
+    untrusted-callee bug rather than every delegatecall.
+
+    [Worker decision: the target must be calldata-derived (not merely symbolic).
+    oracle initialises storage as a constant-0 array, so a target loaded from an
+    *uninitialised* storage slot can collapse to a concrete 0 and would be missed
+    by a bare "is symbolic" gate; conversely, a target read from storage that is
+    not attacker-supplied should NOT be flagged as untrusted (that is the
+    upgradeable-proxy pattern, where the implementation slot is owner-gated). The
+    sound, low-false-positive signal for SWC-112 specifically is therefore
+    "the delegatecall target is influenced by calldata" — exactly the EtherLeak
+    detector's recipient test, applied to the delegatecall target.]
+    """
+
+    category = "delegatecall_untrusted_callee"
+
+    # DELEGATECALL and CALLCODE both run callee code in the caller's storage
+    # context. STATICCALL/CALL keep their own context, so they are not SWC-112.
+    _OPS = ("DELEGATECALL", "CALLCODE")
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._OPS:
+            return
+        # stack: gas, addr, argsOffset, argsLength, retOffset, retLength
+        if len(state.stack) < 2:
+            return
+        target = state.stack[-2]
+        if _is_concrete(target):
+            return  # hard-coded library / immutable implementation — trusted
+        if _mentions_calldata(target, vm):
+            self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 def _origin_symbol_name(vm) -> str:
     """The z3 leaf name of this transaction's symbolic tx.origin."""
     raw = vm.origin.raw if hasattr(vm.origin, "raw") else vm.origin
@@ -390,6 +450,53 @@ def _ast_mentions(node, target_name: str) -> bool:
 def _mentions_caller(bv, vm) -> bool:
     """True if the bitvec value is derived from the symbolic msg.sender."""
     return _ast_mentions(bv, _caller_symbol_name(vm))
+
+
+def _ast_mentions_prefix(node, prefix: str) -> bool:
+    """True if the z3 AST rooted at `node` contains a leaf whose name starts
+    with `prefix` — used to match the calldata symbol *family* (`calldata`,
+    `calldata_<offset>`, `calldata_dyn`, and their per-epoch-prefixed variants)
+    without enumerating every materialised offset."""
+    try:
+        import z3
+    except Exception:
+        return False
+    raw = node.raw if hasattr(node, "raw") else node
+    if not isinstance(raw, z3.AstRef):
+        return False
+    stack = [raw]
+    seen = set()
+    while stack:
+        cur = stack.pop()
+        key = cur.get_id() if hasattr(cur, "get_id") else id(cur)
+        if key in seen:
+            continue
+        seen.add(key)
+        if isinstance(cur, z3.ExprRef):
+            try:
+                if cur.num_args() == 0:
+                    name = cur.decl().name()
+                    # match the calldata family at the bare or epoch-prefixed
+                    # form (epoch prefixes are like "tx1_"); a plain
+                    # `name.startswith(prefix)` covers the bare case and any
+                    # suffix (offset) case, and we additionally allow an epoch
+                    # prefix before the family name.
+                    if prefix in name:
+                        return True
+            except Exception:
+                pass
+            for i in range(cur.num_args()):
+                stack.append(cur.arg(i))
+    return False
+
+
+def _mentions_calldata(bv, vm) -> bool:
+    """True if the bitvec value is derived from any symbolic calldata word.
+
+    oracle models calldata as a family of leaves (`calldata`, `calldata_<off>`,
+    `calldata_dyn`), optionally namespaced with a per-transaction epoch prefix.
+    A delegatecall target derived from any of them is attacker-controllable."""
+    return _ast_mentions_prefix(bv, "calldata")
 
 
 def _guarded_by_caller(state, vm) -> bool:
@@ -456,4 +563,5 @@ DETECTOR_REGISTRY = {
     "reentrancy": ReentrancyDetector,
     "access-control": AccessControlEscalationDetector,
     "tx-origin": TxOriginAuthDetector,
+    "delegatecall": DelegatecallUntrustedDetector,
 }
