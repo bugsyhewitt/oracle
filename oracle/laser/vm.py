@@ -629,9 +629,27 @@ class SymbolicVM:
     _op_gas = lambda self, s, i: self._generic_env(s, i, "gas")
     _op_gaslimit = lambda self, s, i: self._generic_env(s, i, "gaslimit")
     _op_coinbase = lambda self, s, i: self._generic_env(s, i, "coinbase")
-    _op_difficulty = lambda self, s, i: self._generic_env(s, i, "difficulty")
     _op_chainid = lambda self, s, i: self._generic_env(s, i, "chainid")
     _op_msize = lambda self, s, i: self._generic_env(s, i, "msize")
+
+    def _op_difficulty(self, state, inst):
+        # DIFFICULTY (0x44) pushes `block.prevrandao` (post-Merge) or
+        # `block.difficulty` (pre-Merge). Record the read so the
+        # PrevrandaoRandomnessDetector can tell "the function read prevrandao"
+        # apart from functions that never touch it. Branching control flow on
+        # `block.prevrandao` is a weak-randomness smell (SWC-120, "Weak Sources of
+        # Randomness from Chain Attributes"): the value is supplied by the block
+        # proposer and is observable by an attacker calling in the same
+        # transaction, so a contract that gates a payout / picks a winner on it is
+        # making a security decision an attacker can predict or grind. The stable,
+        # named `prevrandao` symbol (formerly the generic "difficulty" name) is
+        # pushed so a later guard branching on it is recognisable in the path
+        # constraints. Distinct from BLOCKHASH (a different chain attribute keyed
+        # by the BlockhashRandomnessDetector's `blockhash_<pc>` family).
+        state.prevrandao_loaded = True
+        state.push(symbol_factory.BitVecSym(self._sym("prevrandao"), 256))
+        state.pc = inst.pc + 1
+        return [state]
 
     def _op_codesize(self, state, inst):
         # CODESIZE is the concrete length of the running contract's bytecode.
