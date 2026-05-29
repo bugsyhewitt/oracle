@@ -422,6 +422,58 @@ unblocked work.
 
 ---
 
+### 15. `delegatecall`-to-untrusted-callee detector (SWC-112) ✅ IMPLEMENTED (Phase 2, Rotation 14)
+
+**Status:** Shipped. Added `DelegatecallUntrustedDetector` (category
+`delegatecall_untrusted_callee`, severity `high`, CLI token `delegatecall`) —
+oracle's ninth detector and the second new *bug class* of Phase 2 (after the
+Rotation 13 tx.origin detector). It flags a `DELEGATECALL`/`CALLCODE` whose
+**target address operand is derived from calldata** (attacker-controllable),
+which is SWC-112, "Delegatecall to Untrusted Callee" — the canonical Parity
+multisig wallet bug. `delegatecall` runs the callee's code in *this* contract's
+storage and balance context, so an attacker who supplies a malicious target can
+rewrite any storage slot (including the owner slot) and drain the contract. The
+discriminating signal mirrors the EtherLeak detector's recipient test, applied
+to the delegatecall target (`stack[-2]`): the target is checked with a new
+`_mentions_calldata` walk (a prefix-matching variant of `_ast_mentions` that
+recognises the `calldata`/`calldata_<offset>`/`calldata_dyn` symbol family). A
+**concrete** target — a hard-coded / immutable library address — is *not*
+flagged: it is not attacker-controllable. This keeps the detector to the
+specific untrusted-callee bug rather than the legitimate upgradeable-proxy
+pattern (an owner-gated implementation slot is a fresh storage symbol, not a
+calldata leaf), and distinguishes it from the access-control detector (which
+flags an *unguarded* delegatecall regardless of target origin). The report
+`_TITLE` map gains `Delegatecall to Untrusted Callee (SWC-112)` so h1md headings
+and SARIF rule descriptions render properly. Tests: `tests/test_delegatecall.py`
+(14 default + 2 slow real-Z3) cover registry/CLI registration, severity, fixture
+opcode presence, vulnerable-flagged / safe-clean at both the detector and
+end-to-end layers, the no-delegatecall false-positive guard, participation in an
+`all`-checks run, and h1md + SARIF rendering. Two new fixtures:
+`delegatecall-vuln.sol` (`forward(address target, ...)` delegatecalls into a
+calldata-supplied target) and `delegatecall-safe.sol` (delegatecalls a hard-coded
+constant library address — DELEGATECALL still present, so the test proves the
+detector keys on the untrusted target, not the opcode).
+
+**Why it matters:** `delegatecall` to an untrusted callee is a named SWC entry
+(SWC-112), on every audit checklist, and the root cause of the second Parity
+multisig freeze ($150M+). oracle modelled DELEGATECALL only as an access-control
+*sink* (Rotation 5), which misses the distinct, very-high-severity case where
+the target *itself* is attacker-supplied — even a perfectly access-controlled
+`delegatecall(userLib, ...)` is exploitable. It maps cleanly onto oracle's
+existing detector architecture (the same concrete/symbolic + AST-walk machinery
+the EtherLeak and access-control detectors use), so it adds a high-value bug
+class with no engine refactor and no new dependency. Selected for Rotation 14
+because the numbered roadmap items 1-14 are all shipped or blocked (#7
+counterexample validator needs `py-evm`, #10 Python 3.14 needs upstream
+`coincurve` 3.14 wheels), so a new self-contained detector — the same play that
+shipped Rotation 13 — is the highest-value unblocked work. This is the assessed
+"#15+" gap the roster called for.
+
+**Estimated effort:** Low-Medium. One detector class, a `_mentions_calldata`
+prefix walk, a report title, two fixtures.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

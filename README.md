@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -231,6 +231,29 @@ The discriminating signal is that control flow **branched on** `tx.origin`: an
 path constraint references the symbolic `origin` value. A contract that
 authenticates via `msg.sender` — or never reads `tx.origin` at all
 (`tx-origin-safe.sol`) — is **not** flagged.
+
+### `delegatecall` — delegatecall to untrusted callee (SWC-112)
+
+```bash
+oracle --contract tests/fixtures/delegatecall-vuln.sol \
+       --input-type sol --check delegatecall --format json
+```
+
+Flags a `DELEGATECALL`/`CALLCODE` whose **target address is derived from
+calldata** (`category: "delegatecall_untrusted_callee"`). `delegatecall` runs
+the callee's code in **this** contract's storage and balance context, so if the
+target is attacker-supplied the attacker can rewrite any storage slot (including
+the owner slot) and drain the contract — the canonical Parity multisig wallet
+bug. `delegatecall-vuln.sol`'s `forward(address target, ...)` passes a
+calldata-supplied `target` straight into `delegatecall` and is flagged.
+
+The discriminating signal is that the call **target operand** is
+attacker-controllable, not merely that a `delegatecall` exists. A `delegatecall`
+to a **hard-coded / immutable library address** (`delegatecall-safe.sol`) is a
+compile-time constant, not attacker-controllable, and is **not** flagged — which
+keeps the detector to the specific untrusted-callee bug rather than every
+upgradeable-proxy pattern. (This is distinct from `access-control`, which flags
+an *unguarded* `delegatecall` regardless of where the target comes from.)
 
 ### bytecode input (no solc)
 

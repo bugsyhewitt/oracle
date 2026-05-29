@@ -33,6 +33,7 @@ _TITLE = {
     "reentrancy": "Reentrancy (check-effects-interactions violation)",
     "access_control_escalation": "Access Control Escalation",
     "tx_origin_authentication": "tx.origin Authentication (SWC-115)",
+    "delegatecall_untrusted_callee": "Delegatecall to Untrusted Callee (SWC-112)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
