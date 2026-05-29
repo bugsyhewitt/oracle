@@ -77,6 +77,14 @@ class MachineState:
         # subsequent instruction (the block-value constraint persists down the
         # path).
         self.timestamp_flagged: bool = False
+        # Set once this path has been flagged for an EXTCODESIZE-based caller-type
+        # check (consumed by ExtcodesizeCallerCheckDetector): a control-flow branch
+        # on `extcodesize(addr)` is a bypassable "is the caller a contract / an
+        # EOA?" guard (a contract's constructor reports codesize 0). The
+        # extcodesize constraint persists down the path, so a per-path latch keeps
+        # the finding to one-per-guarded-path. Lives on the machine state so it
+        # propagates across path forks.
+        self.extcodesize_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -98,6 +106,7 @@ class MachineState:
         new.tx_origin_flagged = self.tx_origin_flagged
         new.blockval_loaded = self.blockval_loaded
         new.timestamp_flagged = self.timestamp_flagged
+        new.extcodesize_flagged = self.extcodesize_flagged
         return new
 
     def fork_world(self) -> None:

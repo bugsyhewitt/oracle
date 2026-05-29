@@ -40,6 +40,7 @@ CONTRACTS = {
     "timestamp-dependence-safe.sol": "TimestampDependenceSafe",
     "ether-withdrawal-vuln.sol": "EtherWithdrawalVuln",
     "ether-withdrawal-safe.sol": "EtherWithdrawalSafe",
+    "extcodesize-check-safe.sol": "ExtCodeSizeCheckSafe",
 }
 
 
