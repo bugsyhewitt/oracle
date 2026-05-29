@@ -536,6 +536,18 @@ decorated `@pytest.mark.slow` and are excluded from the default run.
   #     with: { sarif_file: oracle.sarif }
   ```
 
+  Every result also carries a `partialFingerprints` entry
+  (`oracleFindingHash/v1`) so a SARIF consumer can track an alert **across
+  runs**. GitHub code scanning uses this fingerprint to decide whether a result
+  in a new run is the *same* logical finding as one it has already seen — so a
+  bug you have already triaged is not re-opened as "new", and a dismissed alert
+  stays dismissed, even when an unrelated edit elsewhere in the contract shifts
+  every program counter. The fingerprint is deliberately **position-
+  independent**: it hashes the finding's bug class plus the *opcode path* that
+  reaches it (the control-flow signature), not the raw `pc`. It changes only
+  when the reaching path genuinely changes — i.e. when it really is a different
+  finding — which is exactly the behaviour a CI baseline wants.
+
 ---
 
 ## Instruction coverage

@@ -4,6 +4,8 @@ import json
 
 from oracle import __version__
 from oracle.report import (
+    SARIF_FINGERPRINT_KEY,
+    _finding_fingerprint,
     format_coverage_lcov,
     format_h1md,
     format_json,
@@ -214,6 +216,88 @@ def test_sarif_rule_title_for_newer_detectors():
 def test_format_report_dispatch_sarif():
     out = format_report(SAMPLE, "x.sol", "sarif")
     assert json.loads(out)["version"] == "2.1.0"
+
+
+# --------------------------------------------------------------------- #
+# SARIF partialFingerprints — cross-run finding identity
+# --------------------------------------------------------------------- #
+def test_sarif_result_carries_partial_fingerprint():
+    data = json.loads(format_sarif(SAMPLE, "x.sol"))
+    result = data["runs"][0]["results"][0]
+    fps = result["partialFingerprints"]
+    assert SARIF_FINGERPRINT_KEY in fps
+    # SHA-256 hex digest: 64 lowercase hex chars.
+    digest = fps[SARIF_FINGERPRINT_KEY]
+    assert len(digest) == 64
+    assert all(c in "0123456789abcdef" for c in digest)
+
+
+def test_fingerprint_is_independent_of_program_counter():
+    """The same bug at a shifted pc keeps the same fingerprint — so an edit that
+    only renumbers pcs does not churn the alert baseline."""
+    base = dict(SAMPLE[0])
+    shifted = dict(SAMPLE[0])
+    # simulate an unrelated edit inserting opcodes earlier: every pc moves, but
+    # the category and the opcode path leading to the sink are unchanged.
+    shifted["pc"] = base["pc"] + 100
+    shifted["trace"] = [
+        {"pc": step["pc"] + 100, "op": step["op"]} for step in base["trace"]
+    ]
+    assert _finding_fingerprint(base) == _finding_fingerprint(shifted)
+
+
+def test_fingerprint_differs_by_category():
+    a = dict(SAMPLE[0])
+    b = dict(SAMPLE[0])
+    b["category"] = "integer_overflow"
+    assert _finding_fingerprint(a) != _finding_fingerprint(b)
+
+
+def test_fingerprint_differs_by_opcode_path():
+    """A genuinely different reaching path (different opcode sequence) is a
+    different finding and gets a different fingerprint."""
+    a = dict(SAMPLE[0])
+    b = dict(SAMPLE[0])
+    b["trace"] = [
+        {"pc": 0, "op": "CALLVALUE"},
+        {"pc": 20, "op": "JUMPDEST"},
+        {"pc": 74, "op": "INVALID"},
+    ]
+    assert _finding_fingerprint(a) != _finding_fingerprint(b)
+
+
+def test_fingerprint_anchors_on_vulnerable_opcode_when_trace_empty():
+    """A finding whose trace does not end at (or omits) the vulnerable opcode
+    still produces a stable, op-anchored fingerprint."""
+    finding = {
+        "category": "reachable_selfdestruct",
+        "severity": "high",
+        "pc": 10,
+        "op": "SELFDESTRUCT",
+        "trace": [],
+        "trigger_input": {},
+    }
+    fp = _finding_fingerprint(finding)
+    assert len(fp) == 64
+    # adding the matching terminal op to the trace must not change identity:
+    # the helper anchors on `op` either way.
+    finding_with_trace = dict(finding)
+    finding_with_trace["trace"] = [{"pc": 10, "op": "SELFDESTRUCT"}]
+    assert _finding_fingerprint(finding_with_trace) == fp
+
+
+def test_fingerprint_stable_across_repeated_calls():
+    """Determinism: the same finding hashes to the same value every time (no
+    set/dict ordering leakage into the digest)."""
+    f = dict(MULTI[0])
+    assert _finding_fingerprint(f) == _finding_fingerprint(f)
+
+
+def test_distinct_findings_get_distinct_fingerprints_in_run():
+    data = json.loads(format_sarif(MULTI, "x.sol"))
+    results = data["runs"][0]["results"]
+    fps = [r["partialFingerprints"][SARIF_FINGERPRINT_KEY] for r in results]
+    assert len(set(fps)) == len(fps)
 
 
 # --------------------------------------------------------------------- #

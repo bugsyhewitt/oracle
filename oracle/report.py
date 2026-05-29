@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import List
 
@@ -193,6 +194,56 @@ def _sarif_rules(findings: List[dict]) -> List[dict]:
     return rules
 
 
+# SARIF partialFingerprints key. The "/v1" suffix is the SARIF-recommended way
+# to version a fingerprint scheme: if the algorithm ever changes, bump to /v2 so
+# a consumer (GitHub code scanning) treats old and new fingerprints as distinct
+# rather than silently re-keying every historical alert.
+SARIF_FINGERPRINT_KEY = "oracleFindingHash/v1"
+
+
+def _finding_fingerprint(finding: dict) -> str:
+    """A stable, position-independent identity for a finding.
+
+    GitHub Advanced Security (and any SARIF consumer) uses
+    `result.partialFingerprints` to track an alert *across runs*: two results
+    with the same fingerprint are the same logical finding, so a known bug is
+    not re-reported as "new" — and is not lost from a baseline — when unrelated
+    edits elsewhere in the contract shift program counters.
+
+    oracle's raw `pc` is a poor identity for this: inserting a single opcode
+    early in the contract renumbers every downstream pc, so a pc-keyed
+    fingerprint would churn the entire alert set on any edit. Instead the
+    fingerprint is derived from the finding's *semantic shape*:
+
+      * the detector `category` (the bug class), and
+      * the structural **opcode path** that reaches it — the ordered sequence of
+        mnemonics in the execution trace, terminated by the vulnerable opcode.
+
+    The opcode path is the control-flow signature of the bug: it is invariant
+    under edits that do not change the path of opcodes leading to the sink, but
+    changes when the actual reaching path changes (i.e. when it really is a
+    different finding). Trace `pc`s are deliberately excluded — only the opcode
+    sequence and category feed the hash — so the fingerprint is position-
+    independent. The result is a hex SHA-256 digest, the form GitHub expects.
+
+    [Worker decision: hash the opcode *sequence*, not the pcs. A pc-keyed hash
+    re-flags every finding as new after a one-line edit (every pc shifts);
+    hashing only the category + opcode path makes the identity track the bug's
+    control-flow shape, which is what a triage baseline wants. SHA-256 hex is
+    used (stdlib `hashlib`, no new dependency) because GitHub code scanning
+    documents fingerprints as opaque strings and compares them verbatim.]
+    """
+    category = str(finding.get("category", ""))
+    trace = finding.get("trace") or []
+    ops = [str(step.get("op", "")) for step in trace if isinstance(step, dict)]
+    # Always anchor on the vulnerable opcode even if the trace is empty (some
+    # detectors record a terminal finding with a minimal trace).
+    if not ops or ops[-1] != str(finding.get("op", "")):
+        ops.append(str(finding.get("op", "")))
+    signature = category + "\n" + ">".join(ops)
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()
+
+
 def _sarif_result(finding: dict, contract: str) -> dict:
     """A single SARIF `result` for one oracle finding.
 
@@ -227,6 +278,12 @@ def _sarif_result(finding: dict, contract: str) -> dict:
                 }
             }
         ],
+        "partialFingerprints": {
+            # Position-independent identity so a SARIF consumer (GitHub code
+            # scanning) tracks this alert across runs instead of re-flagging it
+            # as new whenever an unrelated edit shifts program counters.
+            SARIF_FINGERPRINT_KEY: _finding_fingerprint(finding),
+        },
         "properties": {
             "pc": pc,
             "opcode": op,
