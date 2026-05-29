@@ -22,6 +22,7 @@ from oracle.laser.vm import DetectorHook, _bvv
 SEVERITY = {
     "assertion_violation": "medium",
     "integer_overflow": "high",
+    "integer_underflow": "high",
     "reachable_selfdestruct": "high",
     "unconstrained_ether_transfer": "high",
     "arbitrary_storage_write": "high",
@@ -92,6 +93,112 @@ def _mul_overflow(a: BitVec, b: BitVec):
     # a*b overflows 256-bit when b != 0 and the wrapped product is smaller than a
     prod = a * b
     return And(b != _bvv(0), UGT(a, prod))
+
+
+class IntegerUnderflowDetector(DetectorHook):
+    """Detects unsigned integer underflow on SUB involving symbolic operands
+    (SWC-101, "Integer Overflow and Underflow" — the underflow half).
+
+    EVM arithmetic is modular over 256 bits with no native bounds checking, so
+    `a - b` where `b > a` does not error — it wraps around to a huge value
+    (`2**256 - (b - a)`). When `a` and `b` are `uint`s the result is silently the
+    near-maximum 256-bit number rather than a negative one. This is the most
+    damaging arithmetic-bug class in practice: a `balances[msg.sender] -= amount`
+    (or `totalSupply - burned`, a `block.number - startBlock` window, a
+    `now - lastWithdraw` cooldown) that underflows mints the attacker an
+    astronomically large balance / supply / allowance and drains the contract —
+    the canonical `batchOverflow` / `proxyOverflow` ERC-20 incident family and a
+    long tail of "underflowed accounting" exploits. solc >= 0.8.0 inserts a
+    revert on underflow (so this surfaces the `unchecked { ... }` blocks and the
+    pre-0.8 / assembly contracts that opt out), and any contract compiled below
+    0.8.0 has no such guard at all.
+
+    This is the mirror of `IntegerOverflowDetector`: that detector handles the
+    ADD/MUL overflow direction (the wrapped result is *smaller* than an operand);
+    this one handles the SUB underflow direction (the subtrahend exceeds the
+    minuend, so the wrapped result is *larger* than the minuend). They are kept as
+    separate detectors keyed to distinct operations and distinct categories
+    (`integer_overflow` vs `integer_underflow`) so each reports its own bug
+    direction with its own SWC-aligned title and so a triage team can suppress one
+    direction without the other — mirroring oracle's one-detector-per-bug-class
+    house style.
+
+    Detection signal — a `SUB` whose operands are not both concrete (so the
+    subtraction involves attacker-influenced / symbolic data), recorded as a
+    candidate finding whose `extra_constraint` asserts the underflow condition
+    `b > a` (the subtrahend strictly exceeds the minuend). The EVM `SUB` pops
+    `a` (top of stack) then `b` and pushes `a - b`, so the operands inspected here
+    are `state.stack[-1]` (a) and `state.stack[-2]` (b). The analysis driver then
+    asks Z3 whether the path constraints AND `b > a` are jointly satisfiable; only
+    a genuinely reachable underflow becomes a finding, with a concrete trigger
+    input. A subtraction over two concrete constants is skipped — the compiler
+    would have folded a real constant underflow, and there is no symbolic input to
+    drive — exactly as the overflow detector skips concrete ADD/MUL.
+
+    A subtraction is skipped when either operand involves the compiler's ABI /
+    memory **plumbing** rather than program data — specifically `calldatasize`
+    (the dispatcher's `calldatasize - 4` argument-length check), the free-memory-
+    pointer family (`mem_*`, oracle's coarse per-PC memory-read symbols), and
+    `msize`. solc emits these subtractions on *every* contract as bookkeeping, and
+    oracle's coarse memory model mints each `mem_*` read as an independent symbol,
+    so an unfiltered "every symbolic SUB" rule would treat the calldata-length
+    check and free-memory-pointer math as underflow candidates on contracts with
+    no arithmetic bug at all. Filtering them keeps the detector keyed to a
+    subtraction over genuine program data (calldata words, storage, callvalue,
+    msg.sender) — the SWC-101 surface — rather than the ABI scaffolding.
+
+    [Worker decision: the underflow condition is `UGT(b, a)` (unsigned `b > a`),
+    reusing the same `extra_constraint` + Z3-reachability mechanism the overflow
+    detector already uses for ADD/MUL — no engine change, no new dependency, no
+    new VM symbol or MachineState field. SUB is the unhandled half of SWC-101:
+    `IntegerOverflowDetector` explicitly covers only ADD and MUL, leaving
+    subtraction underflow — the single most exploited arithmetic bug — entirely
+    undetected. The symbolic-only gate alone (matching the overflow detector) is
+    insufficient for SUB because solc's calldata-length check and free-memory-
+    pointer arithmetic are also symbolic and fire on every contract; the operands
+    are therefore additionally screened against the ABI/memory-plumbing symbol
+    families (`calldatasize`, `mem`, `msize`) so the detector flags only a
+    subtraction over real program data. This keeps the false-positive rate sound
+    over oracle's coarse memory model — exactly the model limitation that makes a
+    naive every-SUB rule unshippable — while still surfacing the genuine
+    storage/calldata underflow, and Z3 reachability over the path constraints
+    (including any `require(b <= a)` guard) does the final filtering: a guarded
+    subtraction is proved unsatisfiable and dropped.]
+    """
+
+    category = "integer_underflow"
+
+    # symbol families that mark a subtraction as compiler ABI/memory plumbing
+    # rather than program-data arithmetic. solc emits `calldatasize - 4`
+    # (argument-length dispatch) and free-memory-pointer math (`mem_*`) on every
+    # contract; oracle's coarse per-PC `mem_*` symbols would otherwise read as
+    # spuriously-underflowing independent values. `msize` is the same class.
+    _PLUMBING_PREFIXES = ("calldatasize", "mem", "msize")
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic != "SUB":
+            return
+        if len(state.stack) < 2:
+            return
+        a = state.stack[-1]  # minuend (top of stack)
+        b = state.stack[-2]  # subtrahend
+        if _is_concrete(a) and _is_concrete(b):
+            return  # only flag symbolic arithmetic (no input to drive)
+        # Skip the compiler's ABI/memory plumbing (calldatasize length check,
+        # free-memory-pointer math). These are symbolic but are not program-data
+        # arithmetic, and over oracle's coarse memory model they would otherwise
+        # produce an underflow candidate on every contract.
+        if any(
+            _ast_mentions_prefix(a, p) or _ast_mentions_prefix(b, p)
+            for p in self._PLUMBING_PREFIXES
+        ):
+            return
+        # 256-bit unsigned underflow: a - b wraps when the subtrahend exceeds the
+        # minuend (b > a), yielding 2**256 - (b - a) instead of a negative value.
+        underflow = UGT(b, a)
+        f = _finding(self.category, state, instruction, vm)
+        f["extra_constraint"] = underflow
+        self.findings.append(f)
 
 
 class ReachableSelfdestructDetector(DetectorHook):
@@ -1293,6 +1400,7 @@ def _concrete_val(bv):
 DETECTOR_REGISTRY = {
     "assertion": AssertionViolationDetector,
     "overflow": IntegerOverflowDetector,
+    "underflow": IntegerUnderflowDetector,
     "selfdestruct": ReachableSelfdestructDetector,
     "ether-leak": EtherLeakDetector,
     "storage-write": StorageWriteDetector,
