@@ -66,6 +66,17 @@ class MachineState:
         # guard is reported exactly once per path rather than on every
         # subsequent instruction (the origin constraint persists down the path).
         self.tx_origin_flagged: bool = False
+        # block-value-as-time tracking (consumed by TimestampDependenceDetector):
+        # set once this path has executed a TIMESTAMP/NUMBER (the function read a
+        # block value). Using block.timestamp/block.number as a randomness or
+        # decision source is manipulable by miners/validators (SWC-116). Lives on
+        # the machine state so it propagates across path forks.
+        self.blockval_loaded: bool = False
+        # Set once this path has been flagged for a block-value-dependent branch,
+        # so the same guard is reported exactly once per path rather than on every
+        # subsequent instruction (the block-value constraint persists down the
+        # path).
+        self.timestamp_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -85,6 +96,8 @@ class MachineState:
         new.caller_loaded = self.caller_loaded
         new.origin_loaded = self.origin_loaded
         new.tx_origin_flagged = self.tx_origin_flagged
+        new.blockval_loaded = self.blockval_loaded
+        new.timestamp_flagged = self.timestamp_flagged
         return new
 
     def fork_world(self) -> None:

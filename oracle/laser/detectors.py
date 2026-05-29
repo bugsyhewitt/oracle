@@ -31,6 +31,7 @@ SEVERITY = {
     "delegatecall_untrusted_callee": "high",
     "unchecked_call_return": "medium",
     "dos_failed_call": "medium",
+    "timestamp_dependence": "medium",
 }
 
 
@@ -535,6 +536,90 @@ class DosFailedCallDetector(DetectorHook):
             self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class TimestampDependenceDetector(DetectorHook):
+    """Detects control flow that depends on a block value used as a proxy for
+    time or randomness (SWC-116, "Block values as a proxy for time").
+
+    `block.timestamp` and `block.number` are set by the block proposer
+    (miner/validator), who has a window of discretion over them — a few seconds
+    of slack on the timestamp, and full control over which transactions land in
+    which block. A contract that *branches on* a block value to gate a payout, a
+    deadline, a lottery winner, or a "random" outcome is letting the proposer
+    influence that decision: the canonical timestamp-as-randomness gambling bug
+    and the deadline-manipulation class (SWC-116). The safe primitives are a
+    commit-reveal scheme or an external randomness oracle, never a raw block
+    value. Reading a block value for display or an event log is harmless; the bug
+    is specifically *deciding control flow* on it.
+
+    Detection signal — the contract **branched control flow on** a block value:
+    a path constraint references the symbolic `timestamp` or `block_number` leaf.
+    That is exactly the shape an `if (block.timestamp > deadline)` /
+    `require(block.timestamp % N == ...)` guard compiles to (a comparison feeding
+    a JUMPI, whose taken/not-taken constraint carries the block-value term). A
+    contract that merely reads `block.timestamp` for a non-control-flow purpose
+    (storing it, emitting it) never produces such a constraint, so this keys on
+    the decision use specifically rather than any TIMESTAMP/NUMBER execution.
+
+    The detector fires once per path. A block-value guard's JUMPI appends a
+    branch condition mentioning the block-value symbol, which then persists for
+    the remainder of that path, so a per-path `timestamp_flagged` latch (carried
+    on the MachineState across forks) reports each block-value-dependent path
+    exactly once instead of re-emitting on every subsequent instruction. A
+    per-detector set of already-flagged pcs additionally dedupes the same guard
+    reached via different paths.
+
+    [Worker decision: keying on a block-value symbol appearing in the path
+    constraints (control flow branched on block.timestamp/block.number) mirrors
+    how TxOriginAuthDetector keys on `origin` and AccessControlEscalationDetector
+    keys on `caller`, and reuses the same `_ast_mentions` walk. It is sound for
+    the canonical `if (block.timestamp ...)` / `require(block.number ...)`
+    randomness/deadline patterns and does not false-positive on a contract that
+    merely reads a block value without gating on it, because a non-branching read
+    never enters a JUMPI condition. `block.timestamp` (TIMESTAMP) and
+    `block.number` (NUMBER) are both flagged: both are proposer-influenced block
+    values used interchangeably as a time/randomness proxy, and the SWC-116 entry
+    names both. BLOCKHASH is deliberately *not* included here — past block hashes
+    are a distinct (and only weakly manipulable) construct; SWC-116's named
+    surface is the time/number proxy, and folding BLOCKHASH in would broaden the
+    detector past one bug class.]
+    """
+
+    category = "timestamp_dependence"
+
+    # the block-value symbol leaves a branch may key on. Both are minted by the
+    # VM (TIMESTAMP -> "timestamp", NUMBER -> "block_number") and set the
+    # per-path `blockval_loaded` latch when read.
+    _BLOCKVAL_NAMES = ("timestamp", "block_number")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        # Only meaningful once a block value has been read on this path. Cheap
+        # gate before the (more expensive) constraint AST walk.
+        if not state.blockval_loaded:
+            return
+        if state.timestamp_flagged:
+            return  # this path's block-value guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on a block value (control flow gated on a proposer-influenced quantity
+        # — the unsafe time/randomness-proxy pattern).
+        if any(
+            _ast_mentions(c, name)
+            for c in state.constraints
+            for name in self._BLOCKVAL_NAMES
+        ):
+            state.timestamp_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -711,4 +796,5 @@ DETECTOR_REGISTRY = {
     "delegatecall": DelegatecallUntrustedDetector,
     "unchecked-call": UncheckedCallReturnDetector,
     "dos-failed-call": DosFailedCallDetector,
+    "timestamp": TimestampDependenceDetector,
 }

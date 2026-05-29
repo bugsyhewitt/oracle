@@ -36,6 +36,8 @@ CONTRACTS = {
     "unchecked-call-safe.sol": "UncheckedCallSafe",
     "dos-failed-call-vuln.sol": "DosFailedCallVuln",
     "dos-failed-call-safe.sol": "DosFailedCallSafe",
+    "timestamp-dependence-vuln.sol": "TimestampDependenceVuln",
+    "timestamp-dependence-safe.sol": "TimestampDependenceSafe",
 }
 
 
