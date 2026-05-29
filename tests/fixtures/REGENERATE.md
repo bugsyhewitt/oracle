@@ -16,6 +16,8 @@ You only need to regenerate them if you change a `.sol` fixture.
 | `deep-assertion.sol` | `DeepAssertion` | `deep-assertion.bin` |
 | `returndata-after-call.sol` | `ReturnDataAfterCall` | `returndata-after-call.bin` |
 | `extcodesize-guard.sol` | `ExtCodeSizeGuard` | `extcodesize-guard.bin` |
+| `unchecked-call-vuln.sol` | `UncheckedCallVuln` | `unchecked-call-vuln.bin` |
+| `unchecked-call-safe.sol` | `UncheckedCallSafe` | `unchecked-call-safe.bin` |
 
 `bytecode-selfdestruct.bin` is a **standalone bytecode-only fixture** (a copy of
 the selfdestruct runtime bytecode) used to prove bytecode-input mode works with

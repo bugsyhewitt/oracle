@@ -32,6 +32,8 @@ CONTRACTS = {
     "tx-origin-safe.sol": "TxOriginSafe",
     "delegatecall-vuln.sol": "DelegatecallVuln",
     "delegatecall-safe.sol": "DelegatecallSafe",
+    "unchecked-call-vuln.sol": "UncheckedCallVuln",
+    "unchecked-call-safe.sol": "UncheckedCallSafe",
 }
 
 

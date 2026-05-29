@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -254,6 +254,30 @@ compile-time constant, not attacker-controllable, and is **not** flagged — whi
 keeps the detector to the specific untrusted-callee bug rather than every
 upgradeable-proxy pattern. (This is distinct from `access-control`, which flags
 an *unguarded* `delegatecall` regardless of where the target comes from.)
+
+### `unchecked-call` — unchecked call return value (SWC-104)
+
+```bash
+oracle --contract tests/fixtures/unchecked-call-vuln.sol \
+       --input-type sol --check unchecked-call --format json
+```
+
+Flags a low-level call whose **boolean success result is discarded**
+(`category: "unchecked_call_return"`, severity `medium`). An EVM call opcode
+(`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`) does **not** revert when the
+callee reverts — it pushes a success word and execution continues. A low-level
+`addr.call(...)` / `addr.send(...)` whose result is ignored lets a failed
+external call pass silently; the contract proceeds as though it succeeded — the
+canonical "unchecked send" bug (the King-of-the-Ether class of incident).
+`unchecked-call-vuln.sol`'s `pay()` makes a `to.call{value: 1}("")` and throws
+the result away, and is flagged.
+
+The discriminating signal is that the success word reaches a `POP` **without
+ever having been branched on** (it appears in no path constraint). A
+`require(ok)` / `if (!ok)` guarded call routes the word through a `JUMPI`, so the
+result is checked — even though Solidity also cleans up the duplicated word with
+a `POP` later — and a checked call (`unchecked-call-safe.sol`) is **not**
+flagged.
 
 ### bytecode input (no solc)
 
