@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -442,6 +442,37 @@ reads a code size (`extcodesize-check-safe.sol`'s owner-gated `destroy()`)
 produces no such constraint and is **not** flagged. The safe primitives are
 explicit allow/deny lists, signature checks, or simply not distinguishing EOAs
 from contracts at all.
+
+### `strict-balance` — unexpected ether balance (SWC-132)
+
+```bash
+oracle --contract tests/fixtures/strict-balance-vuln.sol \
+       --input-type sol --check strict-balance --format json
+```
+
+Flags control flow that **branches on an account balance**
+(`address(this).balance` / `address(x).balance`, `category:
+"strict_balance_equality"`, severity `medium`). A contract's ether balance is
+not controlled solely by its own logic: any account can force ether in via
+`selfdestruct(this)` or by pre-funding a CREATE2 address before deployment —
+neither path runs the receive/fallback code. A contract that treats its raw
+balance as a trustworthy invariant — the canonical `require(address(this).balance
+== expected)` game / state-machine gate — is making an attacker-falsifiable
+assumption (SWC-132, "Unexpected Ether Balance"): a few forced wei breaks the
+invariant, bricking or skewing the contract. `strict-balance-vuln.sol`'s
+`claim()` gates a payout behind `require(address(this).balance == target)` and
+is flagged.
+
+The discriminating signal is that a path constraint references a `balance`
+(BALANCE) or `selfbalance` (SELFBALANCE) leaf — an `if (... .balance ...)` /
+`require(... .balance ...)` guard compiles to a comparison feeding a JUMPI,
+whose condition carries the balance term. A contract that merely *reads* a
+balance for a non-control-flow purpose — forwarding it as a call value, the way
+`ether-withdrawal-vuln.sol` does — never branches on it and is **not** flagged;
+nor is a contract that gates on an internally-tracked deposit accumulator
+(`strict-balance-safe.sol`'s `tracked`-gated `claim()`), which force-feeding
+cannot influence. The safe design tracks deposits in a dedicated storage
+variable and never compares against the raw `address(this).balance`.
 
 ### bytecode input (no solc)
 

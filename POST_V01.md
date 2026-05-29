@@ -870,6 +870,83 @@ two fixtures. No engine or VM change.
 
 ---
 
+### 21. Strict-balance-equality detector (SWC-132) ✅ IMPLEMENTED (Phase 2, Rotation 23)
+
+**Status:** Shipped. Added `StrictBalanceEqualityDetector` (category
+`strict_balance_equality`, severity `medium`, CLI token `strict-balance`) —
+oracle's sixteenth detector and the ninth new *bug class* of Phase 2 (after the
+Rotation 13 tx.origin, 14 delegatecall, 15 unchecked-call, 16 DoS-with-failed-call,
+17 timestamp-dependence, 18 unprotected-ether-withdrawal, 19 block-gas-limit-DoS,
+and 22 bypassable-EXTCODESIZE detectors). It flags control flow that **branches
+on an account balance** — SWC-132, "Unexpected Ether Balance." A contract's ether
+balance is not controlled solely by its own logic: any account can force ether in
+via `selfdestruct(this)` or by pre-funding a CREATE2 address before deployment,
+neither of which runs the receive/fallback code. A contract that treats its raw
+`address(this).balance` as a trustworthy invariant — the canonical
+`require(address(this).balance == expected)` game / state-machine gate — is making
+an attacker-falsifiable assumption: a few forced wei break the invariant and brick
+or skew the contract.
+
+The discriminating signal mirrors the SWC-116 timestamp-dependence and
+bypassable-EXTCODESIZE detectors: a path constraint references a `balance` (BALANCE,
+`address(x).balance`) or `selfbalance` (SELFBALANCE, the gas-cheap
+`address(this).balance`) leaf. An `if (... .balance ...)` / `require(... .balance
+...)` guard compiles to a comparison feeding a JUMPI, whose taken/not-taken
+constraint carries the balance term. Both symbol names share the substring
+`balance`, so a single `_ast_mentions_prefix(c, "balance")` walk catches both
+forms without enumerating the two names. The detector fires once per path via a
+per-path `balance_flagged` latch carried on the MachineState across forks (new
+state field, cloned in `MachineState.clone`), plus a per-detector flagged-pc set
+that dedupes the same guard reached on different paths — the exact pattern the
+EXTCODESIZE and timestamp detectors use. No engine or VM change: the VM already
+mints the `balance` / `selfbalance` symbols (`_op_balance` / `_op_selfbalance`).
+
+This is deliberately distinct from the ether-leak / unprotected-withdrawal
+detectors, which key on a value-forwarding CALL's *recipient* and on a *missing
+caller guard* respectively; here the bug is the **balance-as-trusted-invariant
+assumption itself**, independent of any ether movement. A contract that merely
+*reads* its balance to forward it as a call value never branches on it — the
+`ether-withdrawal-vuln.sol` / `ether-withdrawal-safe.sol` fixtures read
+SELFBALANCE only to forward it, and a dedicated false-positive test pins that
+neither is flagged by `strict-balance`. The report `_TITLE` map gains `Unexpected
+Ether Balance (SWC-132)` so h1md headings and SARIF rule descriptions render;
+medium severity is already handled by the SARIF level / security-severity maps.
+Tests: `tests/test_strict_balance.py` (14 default + 2 slow real-Z3) cover
+registry/CLI registration, severity, fixture opcode presence (vuln reads
+SELFBALANCE; safe reads no balance), vulnerable-flagged / safe-clean at both the
+detector and end-to-end layers, the per-path latch dedupe, the
+balance-forwarding false-positive guard, participation in an `all`-checks run, and
+h1md + SARIF rendering. Two new fixtures: `strict-balance-vuln.sol` (`claim()`
+gates a payout behind `require(address(this).balance == target)`) and
+`strict-balance-safe.sol` (`claim()` gates on an internally-tracked `tracked`
+deposit accumulator and authenticates via `msg.sender`, never branching on the
+raw balance — force-feeding cannot influence `tracked`).
+
+**Why it matters:** Unexpected ether balance is a named SWC entry (SWC-132), on
+every audit checklist, and the root cause of a long tail of force-feeding /
+balance-invariant bugs (the classic "this contract assumes nobody can change its
+balance except through its own functions" gambling and accounting incidents). It
+was a visible gap in oracle's detector set — no prior detector keyed on a
+balance-dependent branch; the neighbouring ether detectors key on call recipients
+and caller guards, not on the balance-as-invariant assumption. It maps cleanly
+onto oracle's existing architecture — the same constraint-AST-walk + per-path-latch
+machinery the timestamp (SWC-116) and EXTCODESIZE detectors use, applied to the
+already-minted balance symbols — so it adds a distinct bug class with no engine
+refactor and no new dependency. Selected for Rotation 23 because the roster called
+for assessing SWC-132 ("unexpected ether balance or delegatecall injection"):
+delegatecall injection (SWC-112) was already shipped in Rotation 14
+(`DelegatecallUntrustedDetector`), so the uncovered half of the assessed gap —
+SWC-132's balance-branch surface — is the highest-value unblocked work, the same
+self-contained-detector play that shipped Rotations 13-22. This is the assessed
+"#21+" gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a balance symbol in the
+path constraints (reusing the timestamp / EXTCODESIZE constraint-walk + per-path
+latch pattern), one new MachineState field, a report title, two fixtures. No engine
+or VM change.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

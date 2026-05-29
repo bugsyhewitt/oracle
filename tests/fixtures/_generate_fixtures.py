@@ -41,6 +41,8 @@ CONTRACTS = {
     "ether-withdrawal-vuln.sol": "EtherWithdrawalVuln",
     "ether-withdrawal-safe.sol": "EtherWithdrawalSafe",
     "extcodesize-check-safe.sol": "ExtCodeSizeCheckSafe",
+    "strict-balance-vuln.sol": "StrictBalanceVuln",
+    "strict-balance-safe.sol": "StrictBalanceSafe",
 }
 
 

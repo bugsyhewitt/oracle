@@ -35,6 +35,7 @@ SEVERITY = {
     "unprotected_ether_withdrawal": "high",
     "block_gas_limit_dos": "medium",
     "extcodesize_caller_check": "medium",
+    "strict_balance_equality": "medium",
 }
 
 
@@ -855,6 +856,90 @@ class ExtcodesizeCallerCheckDetector(DetectorHook):
                 )
 
 
+class StrictBalanceEqualityDetector(DetectorHook):
+    """Detects control flow that depends on a strict account-balance check
+    (SWC-132, "Unexpected Ether Balance").
+
+    A contract's ether balance is **not** controlled solely by the contract's
+    own logic: any account can force ether into it without invoking any of its
+    functions. Two on-chain primitives bypass the receive/fallback path
+    entirely — `selfdestruct(victim)` transfers the destroyed contract's whole
+    balance to `victim` and runs no code, and a `CREATE2` address can be
+    pre-funded before the contract is even deployed. A contract that *branches
+    on* its own (or another account's) balance — the canonical
+    `require(address(this).balance == expected)` invariant, or a
+    `if (address(this).balance >= threshold)` gate used as a state machine
+    transition — is making an assumption an attacker can falsify for a few wei.
+    The classic shape is a "game" that assumes nobody can change its balance
+    except through `play()`, or a contract that treats `this.balance` as a
+    trustworthy accumulator; force-feeding it breaks the invariant and bricks or
+    drains the contract. This is the SWC registry's named SWC-132. The safe
+    design tracks deposits in a dedicated storage variable and never compares
+    against the raw `address(this).balance`.
+
+    Detection signal — the contract **branched control flow on** an account
+    balance: a path constraint references a `balance` or `selfbalance` leaf.
+    oracle's VM mints a `balance` symbol for `BALANCE` (`address(x).balance`)
+    and a `selfbalance` symbol for `SELFBALANCE` (the gas-cheap
+    `address(this).balance`); an `if (... .balance ...)` /
+    `require(... .balance ...)` guard compiles to a comparison feeding a JUMPI,
+    whose taken/not-taken constraint carries the balance term. A contract that
+    reads a balance for a non-control-flow purpose (returning it, emitting it,
+    forwarding it as a call value) never produces such a constraint, so this
+    keys on the *decision* use specifically rather than any BALANCE/SELFBALANCE
+    execution.
+
+    The detector fires once per path. The balance-guard constraint persists for
+    the remainder of the path, so a per-path `balance_flagged` latch (carried on
+    the MachineState across forks) reports each balance-dependent path exactly
+    once instead of re-emitting on every subsequent instruction. A per-detector
+    set of already-flagged pcs additionally dedupes the same guard reached via
+    different paths.
+
+    [Worker decision: keying on a `balance`/`selfbalance` symbol appearing in the
+    path constraints (control flow branched on an account balance) mirrors how
+    TimestampDependenceDetector keys on the block-value symbol,
+    ExtcodesizeCallerCheckDetector keys on the `extcodesize` family, and
+    TxOriginAuthDetector keys on `origin`, and reuses the same prefix AST-walk
+    (`_ast_mentions_prefix`). Both `balance` (BALANCE) and `selfbalance`
+    (SELFBALANCE) share the substring `balance`, so a single prefix match over
+    the `balance` family catches both the `address(x).balance` and the
+    `address(this).balance` forms without enumerating the two symbol names. It is
+    sound for the canonical `require(address(this).balance == X)` /
+    `if (address(this).balance >= X)` patterns and does not false-positive on a
+    contract that merely reads a balance without gating on it, because a
+    non-branching read never enters a JUMPI condition. This is distinct from the
+    ether-leak / unprotected-withdrawal detectors, which key on a value-forwarding
+    CALL's recipient and on a missing caller guard respectively; here the bug is
+    the *balance-as-trusted-invariant assumption* itself, independent of any
+    ether movement. No engine change, no new dependency — the VM already mints
+    the balance symbols.]
+    """
+
+    category = "strict_balance_equality"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if state.balance_flagged:
+            return  # this path's balance guard has already been reported
+        if not state.constraints:
+            return
+        # The guard site is the first instruction whose path constraints branch
+        # on an account balance (control flow gated on a force-feedable quantity
+        # — the unsafe balance-as-invariant pattern). `balance` (BALANCE) and
+        # `selfbalance` (SELFBALANCE) both contain the substring `balance`.
+        if any(_ast_mentions_prefix(c, "balance") for c in state.constraints):
+            state.balance_flagged = True
+            if instruction.pc not in self._flagged_pcs:
+                self._flagged_pcs.add(instruction.pc)
+                self.findings.append(
+                    _finding(self.category, state, instruction, vm)
+                )
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -1035,4 +1120,5 @@ DETECTOR_REGISTRY = {
     "ether-withdrawal": UnprotectedEtherWithdrawalDetector,
     "gas-limit-dos": BlockGasLimitDosDetector,
     "extcodesize-check": ExtcodesizeCallerCheckDetector,
+    "strict-balance": StrictBalanceEqualityDetector,
 }

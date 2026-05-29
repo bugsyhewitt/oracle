@@ -20,6 +20,8 @@ You only need to regenerate them if you change a `.sol` fixture.
 | `unchecked-call-safe.sol` | `UncheckedCallSafe` | `unchecked-call-safe.bin` |
 | `ether-withdrawal-vuln.sol` | `EtherWithdrawalVuln` | `ether-withdrawal-vuln.bin` |
 | `ether-withdrawal-safe.sol` | `EtherWithdrawalSafe` | `ether-withdrawal-safe.bin` |
+| `strict-balance-vuln.sol` | `StrictBalanceVuln` | `strict-balance-vuln.bin` |
+| `strict-balance-safe.sol` | `StrictBalanceSafe` | `strict-balance-safe.bin` |
 
 `bytecode-selfdestruct.bin` is a **standalone bytecode-only fixture** (a copy of
 the selfdestruct runtime bytecode) used to prove bytecode-input mode works with
