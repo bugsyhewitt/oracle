@@ -528,6 +528,72 @@ prefix walk over the existing call-result symbols, a report title, two fixtures.
 
 ---
 
+### 17. DoS with failed call / revert-in-loop detector (SWC-113) ✅ IMPLEMENTED (Phase 2, Rotation 16)
+
+**Status:** Shipped. Added `DosFailedCallDetector` (category `dos_failed_call`,
+severity `medium`, CLI token `dos-failed-call`) — oracle's eleventh detector and
+the fourth new *bug class* of Phase 2 (after the Rotation 13 tx.origin, Rotation
+14 delegatecall, and Rotation 15 unchecked-call detectors). It flags an external
+call (`CALL`/`CALLCODE`/`DELEGATECALL`/`STATICCALL`) made **inside a loop** —
+SWC-113, "DoS with Failed Call" (the revert-in-loop class). A "push" payout that
+`transfer`s/`send`s to every recipient in a loop is a denial-of-service surface:
+an EVM external call hands control to the callee, and `transfer`/`send` (or a
+`require`-checked low-level call) reverts the whole transaction when the callee
+fails, so a single recipient that cannot accept the call reverts the entire
+batch and **no** recipient is ever paid — one malicious or broken entry
+permanently bricks the function for everyone (the classic auction-refund /
+airdrop DoS). The discriminating signal reuses what oracle's executor already
+produces: it unrolls loops by revisiting the loop body's instructions onto the
+per-path `state.trace`, so an external-call op whose pc is **already present in
+the trace at inspect time** (the hook runs before the instruction executes, so
+the current pc is not yet recorded) witnesses that the call has been reached
+before on this path — it is loop-bound. A single, isolated call (a forwarding
+call, or a pull-payment `withdraw()`) reaches its call pc at most once per path
+and is not flagged. A per-detector flagged-pc set reports each loop-bound call
+site once across paths. This is independent of the unchecked-return (SWC-104) and
+ether-leak detectors, which key on the call's *return value* and *recipient*
+respectively, not on the call being loop-bound — and independent of the
+reentrancy/access-control detectors, which key on storage ordering and caller
+guards. No engine change, no new dependency. The report `_TITLE` map gains `DoS
+with Failed Call (SWC-113)` so h1md headings and SARIF rule descriptions render
+properly; medium severity is already handled by the SARIF level / security-
+severity maps. Tests: `tests/test_dos_failed_call.py` (17 default + 2 slow real-
+Z3) cover registry/CLI registration, severity, fixture opcode + loop presence,
+vulnerable-flagged / safe-clean at both the detector and end-to-end layers, the
+per-call-site dedupe, a depth-too-shallow-to-unroll case (pins the signal on the
+loop *recurrence*, not the call), the single-call and no-call false-positive
+guards, participation in an `all`-checks run, and h1md + SARIF rendering. Two new
+fixtures: `dos-failed-call-vuln.sol` (`distribute(address[] calldata)` `transfer`s
+in a loop — a calldata-supplied recipient list, so the loop-entered path is
+satisfiable rather than collapsed by oracle's all-zero initial storage) and
+`dos-failed-call-safe.sol` (a pull-payment `withdraw()` makes a single isolated
+`call` — CALL still present, so the test proves the detector keys on the call
+being loop-bound, not the opcode).
+
+**Why it matters:** DoS with a failed call in a loop is a named SWC entry
+(SWC-113), on every audit checklist, and the root cause of a long tail of
+stuck-funds / unwithdrawable-auction incidents. It was a visible gap in oracle's
+detector set (ten detectors, none covering a loop-structure / availability bug —
+every prior detector keys on a single instruction's operands or the path
+constraints, never on the *control-flow shape*). It maps cleanly onto oracle's
+existing architecture: the bounded executor already unrolls loops onto the trace,
+so the loop-bound signal is a sound, model-robust property the engine produces
+for free, with no engine refactor and no new dependency. Selected for Rotation 16
+because the numbered roadmap items 1-16 are all shipped or blocked (#7
+counterexample validator needs `py-evm`, #10 Python 3.14 needs upstream
+`coincurve` 3.14 wheels), so a new self-contained detector — the same play that
+shipped Rotations 13-15 — is the highest-value unblocked work. SWC-105
+(unprotected SELFDESTRUCT) and SWC-106 (unprotected ether withdrawal) were
+considered and rejected as already covered by the existing reachable-selfdestruct
++ access-control and ether-leak detectors; SWC-107 (reentrancy) already shipped
+in Rotation (#2). SWC-113 is the highest-value *uncovered* candidate. This is the
+assessed "#17+" gap the roster called for.
+
+**Estimated effort:** Low-Medium. One detector class keying on a recurring call
+pc in the per-path trace, a report title, two fixtures.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

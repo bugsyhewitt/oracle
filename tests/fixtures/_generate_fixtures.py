@@ -34,6 +34,8 @@ CONTRACTS = {
     "delegatecall-safe.sol": "DelegatecallSafe",
     "unchecked-call-vuln.sol": "UncheckedCallVuln",
     "unchecked-call-safe.sol": "UncheckedCallSafe",
+    "dos-failed-call-vuln.sol": "DosFailedCallVuln",
+    "dos-failed-call-safe.sol": "DosFailedCallSafe",
 }
 
 
