@@ -46,6 +46,7 @@ _TITLE = {
     "strict_balance_equality": "Unexpected Ether Balance (SWC-132)",
     "blockhash_randomness": "Weak Randomness from Chain Attributes (SWC-120)",
     "transaction_order_dependence": "Transaction Order Dependence (SWC-114)",
+    "arbitrary_jump": "Arbitrary Jump with Function Type Variable (SWC-127)",
 }
 
 # Highest-to-lowest banding order used in the summary block.

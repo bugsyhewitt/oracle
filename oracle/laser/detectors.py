@@ -40,6 +40,7 @@ SEVERITY = {
     "strict_balance_equality": "medium",
     "blockhash_randomness": "medium",
     "transaction_order_dependence": "medium",
+    "arbitrary_jump": "high",
 }
 
 
@@ -1316,6 +1317,84 @@ class TransactionOrderDependenceDetector(DetectorHook):
                 )
 
 
+class ArbitraryJumpDetector(DetectorHook):
+    """Detects a `JUMP` / `JUMPI` whose destination is derived from calldata
+    (SWC-127, "Arbitrary Jump with Function Type Variable").
+
+    The EVM's control flow is, in well-formed compiler output, entirely
+    compiler-determined: every `JUMP`/`JUMPI` target is a constant the compiler
+    computed, and the only legal landing sites are `JUMPDEST` opcodes. A
+    `function` type variable, however, holds an internal jump destination (a code
+    offset) as an ordinary 256-bit value; if that value can be influenced by
+    untrusted input — overwritten via inline assembly, read from an
+    attacker-writable storage slot, or, as in the canonical case, computed from a
+    calldata argument — then invoking it lets the attacker **redirect execution
+    to any JUMPDEST in the bytecode**. That is the SWC registry's named SWC-127,
+    "Arbitrary Jump with Function Type Variable": control flow is steered by the
+    attacker, bypassing access checks, re-entering privileged code paths, or
+    skipping validation. It is the EVM analogue of a corrupted function pointer.
+
+    Detection signal — the destination operand of a `JUMP` / `JUMPI` is
+    **symbolic and derived from calldata** (attacker-controllable). The detector
+    hook runs *before* the instruction executes, so the destination is still the
+    top of the stack: `stack[-1]` for both `JUMP` (`JUMP dest`) and `JUMPI`
+    (`JUMPI dest, cond`). A *concrete* destination — the overwhelmingly common
+    case of ordinary compiler-generated control flow (function dispatch, loop
+    back-edges, internal calls to a fixed offset) — is **not** flagged: it is not
+    attacker-controllable. Only a destination that the engine cannot resolve to a
+    constant *and* that is influenced by calldata is reported.
+
+    This is significant for oracle specifically because the VM **halts** a `JUMP`
+    whose destination it cannot resolve to a concrete `JUMPDEST` (see
+    `_op_jump`): without this detector the most dangerous case — an
+    attacker-steerable jump — is silently pruned as an unexplorable path rather
+    than surfaced as a bug. The detector inspects the operand *before* that
+    pruning, so the arbitrary jump is reported instead of disappearing.
+
+    A per-detector set of already-flagged pcs dedupes the same jump site reached
+    via multiple paths.
+
+    [Worker decision: SWC-127's canonical trigger is a function-type variable
+    whose code-offset value is attacker-influenced. The sound, low-false-positive,
+    model-robust bytecode signal is therefore "the JUMP/JUMPI destination is
+    derived from calldata" — exactly the DelegatecallUntrustedDetector's
+    untrusted-target test (`_mentions_calldata` over the target operand), applied
+    to the jump destination instead of the delegatecall target. Requiring the
+    destination to be *calldata-derived* (not merely symbolic) avoids
+    false-positives on a destination that collapses to a fresh symbol for benign
+    reasons (e.g. a value loaded from oracle's all-zero initial storage) while
+    still catching every attacker-controllable jump — the same reasoning the
+    delegatecall detector documents. Keyed on the operand at inspect time so the
+    finding is recorded before the VM prunes the unresolvable-destination path.
+    No engine refactor, no new dependency.]
+    """
+
+    category = "arbitrary_jump"
+
+    _OPS = ("JUMP", "JUMPI")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._OPS:
+            return
+        # destination is the top of stack for both JUMP (dest) and JUMPI
+        # (dest, cond); the hook runs before the operand is popped.
+        if not state.stack:
+            return
+        dest = state.stack[-1]
+        if _is_concrete(dest):
+            return  # ordinary compiler-generated control flow — trusted target
+        if not _mentions_calldata(dest, vm):
+            return  # symbolic but not attacker-controllable — not SWC-127
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -1501,4 +1580,5 @@ DETECTOR_REGISTRY = {
     "strict-balance": StrictBalanceEqualityDetector,
     "blockhash-randomness": BlockhashRandomnessDetector,
     "tx-order": TransactionOrderDependenceDetector,
+    "arbitrary-jump": ArbitraryJumpDetector,
 }

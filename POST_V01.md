@@ -1138,6 +1138,92 @@ No engine refactor, no new dependency.
 
 ---
 
+### 25. Arbitrary-jump detector (SWC-127) ✅ IMPLEMENTED (Phase 2, Rotation 28)
+
+**Status:** Shipped. Added `ArbitraryJumpDetector` (category `arbitrary_jump`,
+severity `high`, CLI token `arbitrary-jump`) — the next new *bug class* of Phase
+2. It flags a `JUMP` / `JUMPI` whose **destination operand is derived from
+calldata** (attacker-controllable) — SWC-127, "Arbitrary Jump with Function Type
+Variable." In well-formed compiler output every jump destination is a constant
+the compiler computed and the only legal landing sites are `JUMPDEST` opcodes; a
+`function` type variable, however, holds an internal jump destination (a code
+offset) as an ordinary 256-bit value, and if that value is influenced by
+untrusted input — read from a calldata argument, overwritten via inline assembly,
+or loaded from an attacker-writable slot — invoking it lets an attacker redirect
+execution to *any* JUMPDEST in the bytecode, bypassing access checks or
+re-entering privileged code (the EVM analogue of a corrupted function pointer).
+
+The discriminating signal is the DelegatecallUntrustedDetector's untrusted-target
+test (`_mentions_calldata` over the operand), applied to the jump destination
+instead of the delegatecall target. The detector hook runs *before* the
+instruction executes, so the destination is the top of stack (`stack[-1]` for
+both `JUMP dest` and `JUMPI dest, cond`); a *concrete* destination — the
+overwhelmingly common case of ordinary compiler-generated control flow (function
+dispatch, loop back-edges, internal calls to a fixed offset) — is **not** flagged,
+and a symbolic-but-not-calldata destination is likewise not flagged (avoiding
+false-positives on a destination that collapses to a fresh symbol from oracle's
+all-zero initial storage). A per-detector flagged-pc set reports each jump site
+once across paths. No engine refactor, no new dependency.
+
+This is especially valuable for oracle because `_op_jump` **halts** a JUMP whose
+destination it cannot resolve to a concrete `JUMPDEST`: without this detector the
+most dangerous case — an attacker-steerable jump — is silently pruned as an
+unexplorable path rather than surfaced. The detector inspects the operand before
+that pruning, so the arbitrary jump is reported instead of disappearing. It is
+deliberately distinct from the delegatecall detector (SWC-112), which keys on a
+*delegatecall target*, not a jump destination — a dedicated cross-detector test
+pins that SWC-112 stays silent on the arbitrary-jump fixture (which makes no
+delegatecall). The report `_TITLE` map gains `Arbitrary Jump with Function Type
+Variable (SWC-127)`; high severity is already handled by the SARIF level /
+security-severity maps. Tests: `tests/test_arbitrary_jump.py` (16 default + 2 slow
+real-Z3) cover registry/CLI registration, severity, fixture opcode presence,
+vulnerable-flagged / safe-clean at both the detector and end-to-end layers, the
+per-pc dedupe, two false-positive guards (a contract whose jumps are all
+compiler-determined, and the cross-detector separation from SWC-112),
+participation in an `all`-checks run, and h1md + SARIF rendering. Two new
+fixtures: `arbitrary-jump-vuln.sol` (`run(uint256 ptr)` overwrites a function
+pointer with a calldata-derived value via inline assembly and invokes it — the
+JUMP it lowers to takes a calldata-supplied target) and `arbitrary-jump-safe.sol`
+(`sum(uint256 n)` loops and branches — the compiler emits many JUMP/JUMPI opcodes,
+all to fixed labels, so the test proves the detector keys on the calldata-derived
+target, not the opcode).
+
+**Why it matters:** Arbitrary jump with a function type variable is a named SWC
+entry (SWC-127), on every audit checklist, and the EVM's corrupted-function-
+pointer class — a control-flow-hijack bug that bypasses every other guard in the
+contract. It was a visible gap in oracle's detector set (no prior detector keyed
+on a jump-target operand; the neighbouring delegatecall detector keys on a call
+target). It maps cleanly onto oracle's existing architecture — the same
+calldata-derived-operand AST-walk machinery (`_mentions_calldata`) the delegatecall
+detector uses, applied to the JUMP/JUMPI destination — so it adds a high-severity
+named bug class with no engine refactor and no new dependency.
+
+**Verification of prior state (per roster instruction):** the roster called for
+assessing SWC-110 (assert-violation) or SWC-125 (incorrect-inheritance-order) and
+verifying which (if either) was already shipped. SWC-110 (assert-violation) is
+**already shipped** — `AssertionViolationDetector` (category `assertion_violation`,
+CLI token `assertion`) flags reachable INVALID (0xFE), the opcode solc emits for a
+failing `assert()`; a repo grep confirmed the detector, its registry entry, its
+fixture (`assertion-violation.sol`), and its report title all predate this
+rotation. SWC-125 (incorrect inheritance order) is a *source-level* C3-linearization
+concept (`is A, B` ordering) with **no distinguishing bytecode signal** — the
+linearized override resolution is fully baked into the compiled dispatch and call
+targets, so a bytecode/symbolic tool cannot recover the source inheritance order;
+it is the same poor fit as SWC-111 (deprecated functions) and SWC-119 (state-
+variable shadowing) that earlier rotations rejected as source-AST-linter concerns.
+Both assessed options being shipped-or-infeasible, per the roster's "pick the next
+best unshipped gap" instruction, SWC-127 was selected: a high-severity named SWC
+entry with a clean, model-robust bytecode signal (a calldata-derived jump target)
+that reuses the proven `_mentions_calldata` machinery with zero engine change —
+the same self-contained-detector play that shipped Rotations 13-27.
+
+**Estimated effort:** Low. One detector class keying on a calldata-derived
+JUMP/JUMPI destination (reusing the delegatecall detector's `_mentions_calldata`
+operand test), a report title, two fixtures. No engine refactor, no new
+dependency.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on
