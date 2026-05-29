@@ -85,6 +85,16 @@ class MachineState:
         # the finding to one-per-guarded-path. Lives on the machine state so it
         # propagates across path forks.
         self.extcodesize_flagged: bool = False
+        # Set once this path has been flagged for a strict balance-equality check
+        # (consumed by StrictBalanceEqualityDetector): a control-flow branch on
+        # `address(this).balance` / an account's BALANCE is an SWC-132 "unexpected
+        # ether balance" assumption — an attacker can force-feed ether via
+        # `selfdestruct` or by pre-funding a CREATE2 address, so the balance can
+        # never be assumed to equal an internally-tracked value. The balance
+        # constraint persists down the path, so a per-path latch keeps the finding
+        # to one-per-guarded-path. Lives on the machine state so it propagates
+        # across path forks.
+        self.balance_flagged: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -107,6 +117,7 @@ class MachineState:
         new.blockval_loaded = self.blockval_loaded
         new.timestamp_flagged = self.timestamp_flagged
         new.extcodesize_flagged = self.extcodesize_flagged
+        new.balance_flagged = self.balance_flagged
         return new
 
     def fork_world(self) -> None:

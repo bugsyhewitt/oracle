@@ -41,6 +41,7 @@ _TITLE = {
     "unprotected_ether_withdrawal": "Unprotected Ether Withdrawal (SWC-105)",
     "block_gas_limit_dos": "DoS With Block Gas Limit (SWC-128)",
     "extcodesize_caller_check": "Bypassable EXTCODESIZE caller-type check",
+    "strict_balance_equality": "Unexpected Ether Balance (SWC-132)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
