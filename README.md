@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -669,6 +669,51 @@ remediation), `timestamp` (SWC-116, a *time* proxy), and `tx-order` (SWC-114, an
 *ordering* lever): a triage team can band by which chain attribute a contract
 gambled on. Safe primitives are a commit-reveal scheme or an external
 randomness oracle (a VRF), never a raw chain attribute.
+
+### `write-arbitrary-storage` — write to arbitrary storage location (SWC-124)
+
+```bash
+oracle --contract tests/fixtures/write-arbitrary-storage-vuln.sol \
+       --input-type sol --check write-arbitrary-storage --max-depth 40 --format json
+```
+
+Flags an `SSTORE` whose **storage key is derived from calldata**
+(`category: "write_arbitrary_storage"`, severity `high`). The EVM addresses
+contract storage by 256-bit keys. In well-formed compiler output every `SSTORE`
+key is either a compile-time constant (a top-level state variable's slot, fixed
+by the compiler) or a `keccak256`-derived word (a `mapping(...)` / dynamic-array
+element's slot, whose preimage is compiler-controlled). An attacker cannot steer
+those keys. Inline-assembly `sstore(key, val)` with a calldata-supplied `key` —
+or any path that loads a raw storage slot index from calldata and stores through
+it — lets an attacker write to **any** storage slot: overwriting `owner`,
+upgrading the contract to a controlled implementation, or corrupting state any
+other state variable depends on (SWC-124, "Write to Arbitrary Storage
+Location"). `write-arbitrary-storage-vuln.sol`'s `set(uint256 key, uint256 val)`
+takes both the storage key and value from calldata and SSTOREs through them,
+and is flagged.
+
+The discriminating signal is that the SSTORE key is **symbolic and
+calldata-derived** — the same untrusted-target test the `delegatecall` detector
+(SWC-112) applies to its call target and the `arbitrary-jump` detector
+(SWC-127) applies to its jump destination, here applied to the storage write
+key. A *concrete* key (the overwhelmingly common case of an ordinary
+state-variable's fixed slot) is **not** flagged, and a symbolic-but-not-
+calldata-derived key (the typical `mapping(...)` access, whose slot is
+`keccak256(key . slot)` — symbolic but compiler-controlled) is **not** flagged
+either: `write-arbitrary-storage-safe.sol` SSTOREs to a constant slot
+(`setValue`) and to mapping slots (`deposit` / `withdraw`'s
+`balances[msg.sender]`), and is clean — proving the detector keys on a
+calldata-derived key, not on the SSTORE opcode or on symbolic-ness alone.
+
+Deliberately distinct from `storage-write` (`arbitrary_storage_write`, which
+flags *any* symbolic SSTORE key including the routine keccak-derived mapping
+slot): SWC-124's named bug is the narrower, higher-severity *attacker-steered*
+case, so a dedicated SWC-aligned detector lets a triage team band one bug class
+per finding — the precedent set by `unprotected-selfdestruct` (SWC-106) sitting
+alongside the broader `selfdestruct` (`reachable_selfdestruct`) detector. Safe
+designs never accept a storage *key* from untrusted input; if dynamic storage
+addressing is genuinely needed, gate it behind a strict caller-bound access
+check (`onlyOwner`) and a fixed allow-list of slot indices.
 
 ### bytecode input (no solc)
 

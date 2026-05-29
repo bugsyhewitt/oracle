@@ -42,6 +42,7 @@ SEVERITY = {
     "transaction_order_dependence": "medium",
     "arbitrary_jump": "high",
     "prevrandao_randomness": "medium",
+    "write_arbitrary_storage": "high",
 }
 
 
@@ -1489,6 +1490,82 @@ class ArbitraryJumpDetector(DetectorHook):
         self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+class WriteArbitraryStorageDetector(DetectorHook):
+    """Detects an `SSTORE` whose **storage key is derived from calldata**
+    (SWC-124, "Write to Arbitrary Storage Location").
+
+    The EVM addresses contract storage by 256-bit keys. In well-formed
+    compiler output every `SSTORE` key is either a compile-time constant (a
+    top-level state variable's slot, fixed at compile time) or a
+    `keccak256`-derived word (a `mapping(...)` / dynamic-array element's slot,
+    whose preimage is compiler-controlled). An attacker cannot steer those
+    keys: they are pinned by the source. Inline-assembly `sstore(key, val)`
+    with a *calldata-supplied* `key`, however — or any code path that loads a
+    raw storage slot index from calldata and stores through it — lets an
+    attacker write to **any** storage slot: overwriting `owner`, upgrading the
+    contract to a controlled implementation, or corrupting state any other
+    state variable depends on. That is the SWC registry's named SWC-124,
+    "Write to Arbitrary Storage Location": the attacker steers the storage
+    *key*, and a single transaction can rewrite arbitrary contract state.
+
+    Detection signal — the SSTORE key operand is **symbolic and derived from
+    calldata** (attacker-controllable). The detector hook runs *before* the
+    instruction executes, so the key is the top of the stack: `stack[-1]` for
+    `SSTORE key, value` (the VM's `_op_sstore` pops `[key, value]`). A
+    *concrete* key — the overwhelmingly common case of ordinary compiler-
+    generated storage layout (a top-level state variable's fixed slot) — is
+    **not** flagged. A *symbolic-but-not-calldata-derived* key — the typical
+    `mapping(...)` access whose slot is `keccak256(key . slot)`, symbolic but
+    compiler-controlled — is likewise **not** flagged, exactly the
+    discrimination the SWC-127 `ArbitraryJumpDetector` and the SWC-112
+    `DelegatecallUntrustedDetector` apply to their target operands.
+
+    This is deliberately distinct from `StorageWriteDetector` (category
+    `arbitrary_storage_write`), which flags *any* symbolic SSTORE key
+    including the routine `keccak256`-derived mapping slot. SWC-124's named
+    bug is the narrower, higher-severity case of an attacker-steered key, so a
+    dedicated SWC-aligned detector lets a triage team triage one bug class
+    per finding — exactly the precedent set by `unprotected_selfdestruct`
+    (SWC-106) sitting alongside the broader `reachable_selfdestruct`. A
+    per-detector flagged-pc set reports each SSTORE site once across paths.
+
+    [Worker decision: SWC-124's canonical trigger is an SSTORE whose key the
+    attacker controls. The sound, low-false-positive, model-robust bytecode
+    signal is therefore "the SSTORE key is derived from calldata" — the
+    DelegatecallUntrustedDetector's untrusted-target test
+    (`_mentions_calldata` over the key operand), applied to the storage write
+    key. Requiring the key to be *calldata-derived* (not merely symbolic)
+    avoids the false-positive a strict "symbolic key" rule would emit on
+    every mapping access (whose slot is the symbolic `keccak256(...)` of a
+    compiler-controlled preimage). Keyed on the operand at inspect time so
+    the finding is recorded before any subsequent state mutation. No engine
+    refactor, no new dependency.]
+    """
+
+    category = "write_arbitrary_storage"
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic != "SSTORE":
+            return
+        # SSTORE pops [key, value]; the hook runs before the pop, so the key
+        # is still on top of the stack.
+        if len(state.stack) < 2:
+            return
+        key = state.stack[-1]
+        if _is_concrete(key):
+            return  # ordinary state-variable slot — compiler-controlled
+        if not _mentions_calldata(key, vm):
+            return  # symbolic but not attacker-controllable (e.g. keccak slot)
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -1676,4 +1753,5 @@ DETECTOR_REGISTRY = {
     "tx-order": TransactionOrderDependenceDetector,
     "arbitrary-jump": ArbitraryJumpDetector,
     "prevrandao-randomness": PrevrandaoRandomnessDetector,
+    "write-arbitrary-storage": WriteArbitraryStorageDetector,
 }

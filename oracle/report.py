@@ -48,6 +48,7 @@ _TITLE = {
     "transaction_order_dependence": "Transaction Order Dependence (SWC-114)",
     "arbitrary_jump": "Arbitrary Jump with Function Type Variable (SWC-127)",
     "prevrandao_randomness": "Weak Randomness from block.prevrandao (SWC-120)",
+    "write_arbitrary_storage": "Write to Arbitrary Storage Location (SWC-124)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
