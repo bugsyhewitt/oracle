@@ -4,7 +4,7 @@
 
 oracle symbolically executes EVM bytecode with the [Z3](https://github.com/Z3Prover/z3)
 SMT solver to find the classes of vulnerabilities that only path exploration
-can reach: reachable assertion violations, integer overflows, reachable
+can reach: reachable assertion violations, integer overflows and underflows, reachable
 `SELFDESTRUCT`, unconstrained ether transfers, and arbitrary storage writes.
 
 It is **not** another pattern-matching smart-contract scanner. oracle is
@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -156,6 +156,38 @@ oracle --contract tests/fixtures/integer-overflow.sol \
 
 Finds the wrapping `ADD` inside an `unchecked` block
 (`category: "integer_overflow"`) and the input that overflows it.
+
+### `underflow` — integer underflow (SWC-101)
+
+```bash
+oracle --contract tests/fixtures/integer-underflow-vuln.sol \
+       --input-type sol --check underflow --format json
+```
+
+Flags an unsigned **subtraction underflow** (`category: "integer_underflow"`,
+severity `high`) — the underflow half of SWC-101 and the mirror of the `overflow`
+check, which covers only `ADD`/`MUL`. EVM arithmetic is modular over 256 bits, so
+`a - b` where `b > a` does not error — it wraps to `2**256 - (b - a)`, a near-
+maximum value. A `balances[msg.sender] -= amount` that underflows silently mints
+the caller an astronomical balance and drains the contract (the batchOverflow /
+underflowed-accounting incident family); solc ≥ 0.8 reverts on underflow by
+default, so this surfaces the `unchecked { ... }` blocks and pre-0.8 / assembly
+contracts that opt out. `integer-underflow-vuln.sol`'s `withdraw(amount)` does
+`balance - amount` in an `unchecked` block and is flagged, with the concrete
+`amount` that triggers the wrap.
+
+The detector records a candidate on a `SUB` whose operands involve symbolic
+program data, carrying the underflow condition `b > a` as an extra constraint Z3
+solves against the path: only a genuinely reachable underflow becomes a finding, so
+a guarded subtraction — `integer-underflow-safe.sol`'s `safeSub(a, b)` with
+`require(b <= a)`, the `SUB` still present — is proved unsatisfiable and **not**
+flagged. The detector also screens out solc's ABI/memory *plumbing* subtractions
+(the `calldatasize - 4` dispatcher length check and free-memory-pointer math over
+oracle's coarse memory model), so it keys on a subtraction over genuine program
+data rather than the compiler scaffolding every contract emits. This is distinct
+from `overflow`: that detector flags the `ADD`/`MUL` wrap direction and the
+`integer_overflow` category, this one the `SUB` underflow direction and the
+`integer_underflow` category.
 
 ### `selfdestruct` — reachable SELFDESTRUCT
 

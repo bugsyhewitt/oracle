@@ -12,6 +12,8 @@ You only need to regenerate them if you change a `.sol` fixture.
 |---|---|---|
 | `assertion-violation.sol` | `AssertionViolation` | `assertion-violation.bin` |
 | `integer-overflow.sol` | `IntegerOverflow` | `integer-overflow.bin` |
+| `integer-underflow-vuln.sol` | `IntegerUnderflowVuln` | `integer-underflow-vuln.bin` |
+| `integer-underflow-safe.sol` | `IntegerUnderflowSafe` | `integer-underflow-safe.bin` |
 | `reachable-selfdestruct.sol` | `ReachableSelfdestruct` | `reachable-selfdestruct.bin` |
 | `deep-assertion.sol` | `DeepAssertion` | `deep-assertion.bin` |
 | `returndata-after-call.sol` | `ReturnDataAfterCall` | `returndata-after-call.bin` |

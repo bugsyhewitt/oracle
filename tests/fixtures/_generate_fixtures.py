@@ -18,6 +18,8 @@ SOLC_VERSION = "0.8.21"
 CONTRACTS = {
     "assertion-violation.sol": "AssertionViolation",
     "integer-overflow.sol": "IntegerOverflow",
+    "integer-underflow-vuln.sol": "IntegerUnderflowVuln",
+    "integer-underflow-safe.sol": "IntegerUnderflowSafe",
     "reachable-selfdestruct.sol": "ReachableSelfdestruct",
     "deep-assertion.sol": "DeepAssertion",
     "returndata-after-call.sol": "ReturnDataAfterCall",

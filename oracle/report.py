@@ -28,6 +28,7 @@ _SEVERITY_LABEL = {
 _TITLE = {
     "assertion_violation": "Assertion Violation (reachable INVALID)",
     "integer_overflow": "Integer Overflow",
+    "integer_underflow": "Integer Underflow (SWC-101)",
     "reachable_selfdestruct": "Reachable SELFDESTRUCT",
     "unconstrained_ether_transfer": "Unconstrained Ether Transfer",
     "arbitrary_storage_write": "Arbitrary Storage Write",
