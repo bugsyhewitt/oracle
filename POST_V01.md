@@ -1224,6 +1224,116 @@ dependency.
 
 ---
 
+### 26. Write-arbitrary-storage detector (SWC-124) ✅ IMPLEMENTED (Phase 2, Rotation 30)
+
+**Status:** Shipped. Added `WriteArbitraryStorageDetector` (category
+`write_arbitrary_storage`, severity `high`, CLI token `write-arbitrary-storage`) —
+oracle's twentieth detector and the next new *bug class* of Phase 2. It flags an
+`SSTORE` whose **storage key is derived from calldata** (attacker-controllable) —
+SWC-124, "Write to Arbitrary Storage Location." The EVM addresses contract
+storage by 256-bit keys; in well-formed compiler output every `SSTORE` key is
+either a compile-time constant (a top-level state variable's slot, fixed by the
+compiler) or a `keccak256`-derived word (a `mapping(...)` / dynamic-array
+element's slot, whose preimage is compiler-controlled). An attacker cannot steer
+those keys. Inline-assembly `sstore(key, val)` with a calldata-supplied `key` —
+or any path that loads a raw storage slot index from calldata and stores
+through it — lets an attacker write to **any** storage slot: overwriting
+`owner`, upgrading the contract to a controlled implementation, or corrupting
+state any other state variable depends on. A single transaction can rewrite
+arbitrary contract state.
+
+The discriminating signal reuses the exact architecture of the SWC-127
+arbitrary-jump detector (Rotation 28) and the SWC-112 delegatecall detector
+(Rotation 14), applied to a different operand: the top-of-stack key at SSTORE
+inspect time. The detector hook runs *before* the instruction executes, so the
+key is `stack[-1]` for `SSTORE key, value` (the VM's `_op_sstore` pops
+`[key, value]`). A *concrete* key — the overwhelmingly common case of an
+ordinary state-variable's fixed slot — is **not** flagged, and a
+symbolic-but-not-calldata-derived key — the typical `mapping(...)` access whose
+slot is `keccak256(key . slot)`, symbolic but compiler-controlled — is likewise
+**not** flagged. A per-detector flagged-pc set reports each SSTORE site once
+across paths. No engine refactor, no new dependency.
+
+This is deliberately kept distinct from `StorageWriteDetector` (category
+`arbitrary_storage_write`), which flags *any* symbolic SSTORE key including the
+routine keccak-derived mapping slot. SWC-124's named bug is the narrower,
+higher-severity *attacker-steered* case, so a dedicated SWC-aligned detector
+lets a triage team band one bug class per finding — exactly the precedent set by
+`unprotected_selfdestruct` (SWC-106) sitting alongside the broader
+`reachable_selfdestruct` detector. A dedicated cross-detector test pins that the
+two detectors carve different signal bands: on the safe fixture the broad
+`storage-write` fires on the keccak-derived mapping slot but SWC-124 stays
+silent; on the vuln fixture both fire (the key is symbolic AND calldata-derived).
+The report `_TITLE` map gains `Write to Arbitrary Storage Location (SWC-124)`;
+high severity is already handled by the SARIF level / security-severity maps.
+Tests: `tests/test_write_arbitrary_storage.py` (17 default + 2 slow real-Z3)
+cover registry/CLI registration, severity, fixture opcode presence,
+vulnerable-flagged / safe-clean at both the detector and end-to-end layers, the
+per-pc dedupe, two false-positive guards (the `access-control-vuln` fixture
+whose `owner = msg.sender` SSTORE writes to a constant slot, and the
+`arbitrary-jump-vuln` fixture which makes no SSTORE through a calldata-derived
+key), the explicit distinct-from-`storage-write` separation, participation in an
+`all`-checks run, and h1md + SARIF rendering. Two new fixtures:
+`write-arbitrary-storage-vuln.sol` (`set(uint256 key, uint256 val)` uses inline
+assembly to `sstore(key, val)` — the SSTORE key is loaded directly from
+calldata) and `write-arbitrary-storage-safe.sol` (`setValue` writes to a
+constant slot, `deposit`/`withdraw` write to mapping slots whose keys are
+`keccak256(msg.sender . slot)` — symbolic but not calldata-derived; multiple
+SSTORE opcodes are still present, so the test proves the detector keys on the
+calldata-derived key, not on the opcode).
+
+**Why it matters:** Write to Arbitrary Storage Location is a named SWC entry
+(SWC-124), on every audit checklist, and the canonical "single-transaction
+takeover" class — corrupt slot 0 to seize ownership, corrupt an implementation
+pointer to upgrade to a malicious contract, corrupt a token-balance slot to
+mint at will. It was a visible gap in oracle's detector set: the existing
+`storage-write` detector flagged the broader "any symbolic SSTORE key" surface
+(which catches benign mapping accesses) but did not isolate the
+attacker-steered-key signal that maps to the named SWC entry. It maps cleanly
+onto oracle's existing architecture — the same calldata-derived-operand AST-walk
+machinery (`_mentions_calldata`) the delegatecall and arbitrary-jump detectors
+use, applied to the SSTORE key — so it adds a high-severity named bug class
+with no engine refactor and no new dependency.
+
+**Verification of prior state (per roster instruction):** the roster called for
+assessing SWC-119 (shadowing-state-variables) or SWC-131 (outdated-solc-version)
+and verifying which (if either) was already shipped. Both are infeasible for
+oracle's bytecode/symbolic model and were explicitly rejected by earlier
+rotations: SWC-119 (Rotation 18 verification, line 773 of this file) is "a pure
+source-level naming concept with no bytecode signal at all" — state-variable
+shadowing is resolved by Solidity's compiler into ordinary SLOAD/SSTOREs to
+compiler-determined slots, leaving no bytecode trace of the original
+parent/child name collision. SWC-131 (Rotation 19 verification, line 859) was
+"rejected earlier as fragile (the 2300-gas literal rarely survives as a
+concrete operand in oracle's coarse model)" and remains so: the compiler's
+2300-gas guard for `transfer`/`send` becomes a stack-derived constant that
+oracle's symbolic execution does not reliably preserve as a literal, so a
+pattern match on "2300" is unsound. Both assessed options being infeasible,
+per the roster's "pick the next best unshipped gap" instruction, SWC-124 was
+selected: a high-severity named SWC entry with a clean, model-robust bytecode
+signal (a calldata-derived SSTORE key) that reuses the proven
+`_mentions_calldata` machinery with zero engine change — the same
+self-contained-detector play that shipped Rotations 13-28. SWC-117 (signature
+malleability) and SWC-121 (signature replay) were also considered but require
+ECRECOVER / precompile modelling that oracle does not currently implement;
+SWC-108 (state variable default visibility), SWC-109 (uninitialized storage
+pointer), SWC-118 (incorrect constructor name), SWC-122 (improper signature
+verification), SWC-125 (incorrect inheritance order — explicitly rejected in
+Rotation 28's verification), SWC-126 (insufficient gas griefing), SWC-129
+(typographical error), SWC-130 (right-to-left override), SWC-133 (abi.encodePacked
+hash collision), SWC-135 (code with no effects), and SWC-136 (unencrypted
+private data) are all source-AST-linter concerns with no bytecode signal —
+the same poor fit as SWC-111 and SWC-119 that earlier rotations rejected.
+SWC-124 is the highest-value *uncovered* candidate that fits oracle's
+symbolic-execution model. This is the assessed "#21+" gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a calldata-derived
+SSTORE key (reusing the arbitrary-jump / delegatecall detectors'
+`_mentions_calldata` operand test), a report title, two fixtures. No engine
+refactor, no new dependency.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on
