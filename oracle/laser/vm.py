@@ -569,7 +569,20 @@ class SymbolicVM:
         return [state]
 
     def _op_timestamp(self, state, inst):
+        # record that this path read block.timestamp (consumed by the timestamp-
+        # dependence detector to tell "function looked at a block value" apart
+        # from functions that never touch it). Using block.timestamp as a
+        # randomness/decision source is miner/validator-manipulable (SWC-116).
+        state.blockval_loaded = True
         state.push(symbol_factory.BitVecSym(self._sym("timestamp"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_number(self, state, inst):
+        # block.number is likewise a block value used as a (manipulable) proxy
+        # for time / randomness; record the read for the SWC-116 detector.
+        state.blockval_loaded = True
+        state.push(symbol_factory.BitVecSym(self._sym("block_number"), 256))
         state.pc = inst.pc + 1
         return [state]
 
@@ -578,7 +591,6 @@ class SymbolicVM:
         state.pc = inst.pc + 1
         return [state]
 
-    _op_number = lambda self, s, i: self._generic_env(s, i, "block_number")
     _op_gas = lambda self, s, i: self._generic_env(s, i, "gas")
     _op_gasprice = lambda self, s, i: self._generic_env(s, i, "gasprice")
     _op_gaslimit = lambda self, s, i: self._generic_env(s, i, "gaslimit")

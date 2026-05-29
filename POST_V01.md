@@ -594,6 +594,86 @@ pc in the per-path trace, a report title, two fixtures.
 
 ---
 
+### 18. Timestamp-dependence detector (SWC-116) ✅ IMPLEMENTED (Phase 2, Rotation 17)
+
+**Status:** Shipped. Added `TimestampDependenceDetector` (category
+`timestamp_dependence`, severity `medium`, CLI token `timestamp`) — oracle's
+twelfth detector and the fifth new *bug class* of Phase 2 (after the Rotation 13
+tx.origin, Rotation 14 delegatecall, Rotation 15 unchecked-call, and Rotation 16
+DoS-with-failed-call detectors). It flags control flow that **branches on a block
+value** (`block.timestamp` / `block.number`) used as a proxy for time or
+randomness — SWC-116, "Block values as a proxy for time." Both values are set by
+the block proposer (miner/validator), who has discretion over them: a few seconds
+of slack on the timestamp and full control over transaction ordering. A contract
+that gates a payout, picks a "random" winner, or enforces a deadline on a block
+value is letting the proposer influence the outcome — the canonical
+timestamp-as-randomness gambling bug and the deadline-manipulation class.
+
+The discriminating signal reuses the exact architecture of the tx.origin detector
+(Rotation 13): the contract **branched control flow on** a block value, so a path
+constraint references the symbolic `timestamp` / `block_number` leaf — the shape
+an `if (block.timestamp ...)` / `require(block.number ...)` guard compiles to (a
+comparison feeding a JUMPI, whose taken/not-taken constraint carries the
+block-value term). The VM's TIMESTAMP and NUMBER handlers now set a per-path
+`blockval_loaded` latch (mirroring `caller_loaded` / `origin_loaded`) so the
+detector cheaply gates before its `_ast_mentions` walk, and `block.number` got a
+dedicated `_op_number` handler (replacing the generic-env lambda) so it sets the
+latch and keeps the stable `block_number` symbol name. A per-path
+`timestamp_flagged` latch (carried on the MachineState across forks, copied in
+`clone()`) reports each block-value-dependent path exactly once, and a
+per-detector flagged-pc set dedupes the same guard reached via different paths —
+the same once-per-path discipline the tx.origin detector uses. No new dependency.
+
+A **non-control-flow** read is deliberately *not* flagged: a view getter that
+merely *returns* `block.timestamp` never enters a JUMPI condition, so its symbol
+appears in no path constraint. `BLOCKHASH` is intentionally out of scope —
+past block hashes are a distinct, only weakly-manipulable construct; SWC-116's
+named surface is the time/number proxy, and folding BLOCKHASH in would broaden the
+detector past one bug class. The report `_TITLE` map gains `Block values as a
+proxy for time (SWC-116)` so h1md headings and SARIF rule descriptions render
+properly; medium severity is already handled by the SARIF level / security-
+severity maps. Tests: `tests/test_timestamp_dependence.py` (20 default + 2 slow
+real-Z3) cover registry/CLI registration, severity, the `_BLOCKVAL_NAMES`
+coverage of both block values, the VM `blockval_loaded` latch on TIMESTAMP and
+NUMBER, latch survival across `clone()`, fixture opcode + branch presence,
+vulnerable-flagged / safe-clean at both the detector and end-to-end layers, the
+per-guard-site dedupe, the no-block-value and caller-guard false-positive guards,
+participation in an `all`-checks run, and h1md + SARIF rendering. Two new
+fixtures: `timestamp-dependence-vuln.sol` (`play(uint256)` gates a payout on
+`block.timestamp % 2 == 0` — a calldata-supplied amount keeps the gated path
+satisfiable rather than collapsed by oracle's all-zero initial storage) and
+`timestamp-dependence-safe.sol` (a `now_()` view getter returns `block.timestamp`
+and `deposit()` branches on a calldata argument — TIMESTAMP still present, so the
+test proves the detector keys on the value *deciding control flow*, not the
+opcode).
+
+**Why it matters:** Block-value dependence is a named SWC entry (SWC-116), on
+every audit checklist, and the root cause of a long tail of on-chain-lottery /
+gambling exploits and deadline-manipulation bugs. It was a visible gap in
+oracle's detector set (eleven detectors, none covering a miner/validator-
+influence bug). It maps cleanly onto oracle's existing architecture — the same
+`_ast_mentions` constraint-walk and per-path-latch machinery the tx.origin and
+access-control detectors use, plus the block-value symbols the VM already mints —
+so it adds a high-value bug class with no engine refactor and no new dependency.
+Selected for Rotation 17 because the numbered roadmap items 1-17 are all shipped
+or blocked (#7 counterexample validator needs `py-evm`, #10 Python 3.14 needs
+upstream `coincurve` 3.14 wheels), so a new self-contained detector — the same
+play that shipped Rotations 13-16 — is the highest-value unblocked work. SWC-131
+(restrictive gas / hardcoded 2300-gas `transfer`/`send`) was considered and
+rejected: Solidity lowers `transfer`/`send` to a CALL whose gas operand is
+computed arithmetically (`2300 * !iszero(value)`), so the literal 2300 rarely
+survives as a clean concrete operand in oracle's coarse model — a fragile signal.
+SWC-101 (integer overflow) is already covered for ADD/MUL by
+`IntegerOverflowDetector`; SWC-107 (reentrancy) already shipped in Rotation #2.
+SWC-116 is the highest-value *uncovered* candidate. This is the assessed "#18+"
+gap the roster called for.
+
+**Estimated effort:** Low-Medium. One detector class keying on a block-value
+symbol in the path constraints, a VM `blockval_loaded` latch + `_op_number`
+handler, a report title, two fixtures.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

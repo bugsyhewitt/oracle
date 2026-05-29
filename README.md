@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,all}]
+       [--check {assertion,overflow,selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -305,6 +305,35 @@ is loop-bound. (The vulnerable loop needs `--max-depth ≳ 18` to unroll past on
 iteration.) A single, isolated call — the **pull-payment** design where each
 account withdraws its own balance (`dos-failed-call-safe.sol`) — reaches its
 call pc at most once per transaction and is **not** flagged.
+
+### `timestamp` — block values as a proxy for time (SWC-116)
+
+```bash
+oracle --contract tests/fixtures/timestamp-dependence-vuln.sol \
+       --input-type sol --check timestamp --format json
+```
+
+Flags control flow that **branches on a block value** (`block.timestamp` or
+`block.number`) used as a proxy for time or randomness (`category:
+"timestamp_dependence"`, severity `medium`). Both values are set by the block
+proposer (miner/validator), who has discretion over them — a few seconds of
+slack on the timestamp and full control over transaction ordering. A contract
+that gates a payout, picks a winner, or enforces a deadline on a block value is
+letting the proposer influence the outcome: the canonical timestamp-as-
+randomness gambling bug and the deadline-manipulation class.
+`timestamp-dependence-vuln.sol`'s `play()` gates a payout on `block.timestamp %
+2 == 0` and is flagged.
+
+The discriminating signal is that a path constraint references the symbolic
+`timestamp` / `block_number` leaf — an `if (block.timestamp ...)` /
+`require(block.number ...)` guard compiles to a comparison feeding a JUMPI, whose
+branch condition carries the block-value term. A **non-control-flow** read — a
+view getter that merely *returns* `block.timestamp` (`timestamp-dependence-
+safe.sol`), or storing it for a log — never enters a JUMPI condition and is
+**not** flagged. The safe primitive is a commit-reveal scheme or an external
+randomness oracle, never a raw block value. (`BLOCKHASH` is intentionally out of
+scope here: past block hashes are a distinct construct; SWC-116's named surface
+is the time/number proxy.)
 
 ### bytecode input (no solc)
 
