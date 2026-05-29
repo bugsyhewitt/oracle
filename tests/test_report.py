@@ -219,6 +219,47 @@ def test_format_report_dispatch_sarif():
 
 
 # --------------------------------------------------------------------- #
+# Concrete-replay validation verdict rendering (POST_V01 #7)
+# --------------------------------------------------------------------- #
+def test_h1md_renders_confirmed_validation():
+    finding = dict(SAMPLE[0])
+    finding["validation"] = "confirmed"
+    finding["validated"] = True
+    out = format_h1md([finding], "x.sol")
+    assert "**Validation:** `confirmed`" in out
+
+
+def test_h1md_renders_unreachable_validation():
+    finding = dict(SAMPLE[0])
+    finding["validation"] = "unreachable"
+    finding["validated"] = False
+    out = format_h1md([finding], "x.sol")
+    assert "**Validation:** `unreachable`" in out
+    assert "false positive" in out
+
+
+def test_h1md_omits_validation_when_absent():
+    out = format_h1md(SAMPLE, "x.sol")
+    assert "**Validation:**" not in out
+
+
+def test_sarif_surfaces_validation_when_present():
+    finding = dict(SAMPLE[0])
+    finding["validation"] = "confirmed"
+    finding["validated"] = True
+    data = json.loads(format_sarif([finding], "x.sol"))
+    props = data["runs"][0]["results"][0]["properties"]
+    assert props["validation"] == "confirmed"
+    assert props["validated"] is True
+
+
+def test_sarif_omits_validation_when_absent():
+    data = json.loads(format_sarif(SAMPLE, "x.sol"))
+    props = data["runs"][0]["results"][0]["properties"]
+    assert "validation" not in props
+
+
+# --------------------------------------------------------------------- #
 # SARIF partialFingerprints — cross-run finding identity
 # --------------------------------------------------------------------- #
 def test_sarif_result_carries_partial_fingerprint():

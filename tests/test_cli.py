@@ -157,6 +157,69 @@ def test_cli_coverage_writes_lcov_file(tmp_path, capsys):
     assert 0 < lh <= lf
 
 
+def test_validate_flag_defaults_to_false():
+    parser = build_parser()
+    ns = parser.parse_args(["--contract", "x.bin", "--input-type", "bytecode"])
+    assert ns.validate is False
+
+
+def test_validate_flag_is_parsed():
+    parser = build_parser()
+    ns = parser.parse_args(
+        ["--contract", "x.bin", "--input-type", "bytecode", "--validate"]
+    )
+    assert ns.validate is True
+
+
+def test_help_lists_validate(capsys):
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--validate" in out
+
+
+def test_cli_validate_adds_verdict_to_json(capsys):
+    rc = main(
+        [
+            "--contract",
+            os.path.join(FIXTURES, "assertion-violation.sol"),
+            "--input-type",
+            "sol",
+            "--check",
+            "assertion",
+            "--format",
+            "json",
+            "--validate",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["findings"], "expected at least one finding"
+    for f in payload["findings"]:
+        assert "validation" in f
+        assert f["validation"] in ("confirmed", "unreachable", "skipped")
+
+
+def test_cli_without_validate_has_no_verdict(capsys):
+    rc = main(
+        [
+            "--contract",
+            os.path.join(FIXTURES, "assertion-violation.sol"),
+            "--input-type",
+            "sol",
+            "--check",
+            "assertion",
+            "--format",
+            "json",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["findings"]
+    assert all("validation" not in f for f in payload["findings"])
+
+
 def test_cli_coverage_bad_path_exits_2(capsys):
     rc = main(
         [

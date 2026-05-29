@@ -69,6 +69,34 @@ def test_all_checks_token_runs():
     assert "reachable_selfdestruct" in cats
 
 
+# --------------------------------------------------------------------- #
+# Concrete-replay validation (POST_V01 #7) integration
+# --------------------------------------------------------------------- #
+def test_validate_off_by_default_no_validation_key():
+    findings = analyze(_bc("assertion-violation"), ["assertion"], max_depth=12)
+    assert findings
+    assert all("validation" not in f for f in findings)
+
+
+def test_validate_enriches_findings_with_verdict():
+    findings = analyze(
+        _bc("assertion-violation"), ["assertion"], max_depth=12, validate=True
+    )
+    assert findings
+    for f in findings:
+        assert "validated" in f and isinstance(f["validated"], bool)
+        assert f["validation"] in ("confirmed", "unreachable", "skipped")
+
+
+def test_validate_preserves_finding_count():
+    base = analyze(_bc("assertion-violation"), ["assertion"], max_depth=12)
+    validated = analyze(
+        _bc("assertion-violation"), ["assertion"], max_depth=12, validate=True
+    )
+    # validation annotates findings; it must never add or drop any.
+    assert len(validated) == len(base)
+
+
 def test_max_depth_prunes_deep_finding_mocked():
     # Even with Z3 mocked, the VM exploration honours max_depth, so the deep
     # finding's candidate is not even produced at shallow depth.
@@ -183,3 +211,30 @@ def test_bytecode_mode_real_z3():
     findings = analyze(parse_bytecode(blob), ["selfdestruct"], max_depth=12)
     assert findings
     assert findings[0]["category"] == "reachable_selfdestruct"
+
+
+@pytest.mark.slow
+def test_validate_real_z3_confirms_assertion():
+    # End-to-end: a genuine assertion finding's Z3 trigger_input, replayed
+    # concretely, must actually reach the vulnerable INVALID opcode. This pins
+    # the symbolic engine and the concrete validator to the same EVM semantics.
+    findings = analyze(
+        _bc("assertion-violation"), ["assertion"], max_depth=12, validate=True
+    )
+    assert findings
+    f = findings[0]
+    assert f["validation"] == "confirmed"
+    assert f["validated"] is True
+
+
+@pytest.mark.slow
+def test_validate_real_z3_confirms_overflow_and_selfdestruct():
+    overflow = analyze(
+        _bc("integer-overflow"), ["overflow"], max_depth=12, validate=True
+    )
+    assert overflow and overflow[0]["validated"] is True
+
+    sd = analyze(
+        _bc("reachable-selfdestruct"), ["selfdestruct"], max_depth=12, validate=True
+    )
+    assert sd and sd[0]["validated"] is True
