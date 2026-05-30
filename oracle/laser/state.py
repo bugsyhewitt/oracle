@@ -51,6 +51,18 @@ class MachineState:
         self.sloads_seen: Set[str] = set()
         self.call_checkpoint: bool = False
         self.sloads_before_call: Set[str] = set()
+        # slot identities SSTOREd so far on this path (consumed by the
+        # CrossFunctionReentrancyDetector to recognise the calling
+        # function's own pre-call CEI fix and suppress a finding when the
+        # caller updates its pre-read slot before the external CALL).
+        self.sstores_seen: Set[str] = set()
+        self.sstores_before_call: Set[str] = set()
+        # pc of the most recent value-forwarding CALL on this path
+        # (consumed by CrossFunctionReentrancyDetector to identify the
+        # call-site whose CEI an SSTORE-after-CALL is patching, since the
+        # CALL forks the state and the post-call branch is a different
+        # MachineState object than the one inspected at CALL time).
+        self.last_call_pc: int = -1
         # Access-control tracking (consumed by AccessControlEscalationDetector):
         # set once this path has executed a CALLER (the function read msg.sender).
         # A privileged write/sink reached on a path that read the sender but never
@@ -150,6 +162,9 @@ class MachineState:
         new.sloads_seen = set(self.sloads_seen)
         new.call_checkpoint = self.call_checkpoint
         new.sloads_before_call = set(self.sloads_before_call)
+        new.sstores_seen = set(self.sstores_seen)
+        new.sstores_before_call = set(self.sstores_before_call)
+        new.last_call_pc = self.last_call_pc
         new.caller_loaded = self.caller_loaded
         new.origin_loaded = self.origin_loaded
         new.tx_origin_flagged = self.tx_origin_flagged

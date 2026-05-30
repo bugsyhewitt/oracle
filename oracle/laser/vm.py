@@ -67,6 +67,16 @@ class DetectorHook:
     def inspect(self, vm: "SymbolicVM", state: MachineState, instruction) -> None:
         raise NotImplementedError
 
+    def finalize(self, vm: "SymbolicVM") -> None:
+        """Called once after `vm.run()` completes (analysis driver invokes).
+
+        Default no-op. Detectors that need to correlate across all explored
+        paths (e.g. cross-function reentrancy: a slot read-before-CALL on one
+        path that is SSTOREd on a different, no-call path) accumulate per-path
+        evidence in `inspect` and emit findings here.
+        """
+        return
+
 
 class SymbolicVM:
     """Bounded symbolic executor over a single contract's runtime bytecode.

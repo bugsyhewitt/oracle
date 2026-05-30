@@ -28,6 +28,7 @@ SEVERITY = {
     "unconstrained_ether_transfer": "high",
     "arbitrary_storage_write": "high",
     "reentrancy": "high",
+    "reentrancy_cross_function": "high",
     "access_control_escalation": "high",
     "tx_origin_authentication": "high",
     "delegatecall_untrusted_callee": "high",
@@ -320,8 +321,167 @@ class ReentrancyDetector(DetectorHook):
     @staticmethod
     def _open_checkpoint(state) -> None:
         state.call_checkpoint = True
-        # snapshot only the slots read *before* this interaction
+        # snapshot the slots read *and* written before this interaction.
+        # `sloads_before_call` keys the same-function CEI fire below;
+        # `sstores_before_call` is the cross-function detector's "did the
+        # calling function apply its own CEI fix?" gate.
         state.sloads_before_call = set(state.sloads_seen)
+        state.sstores_before_call = set(state.sstores_seen)
+
+
+class CrossFunctionReentrancyDetector(DetectorHook):
+    """Detects the cross-function variant of SWC-107 reentrancy.
+
+    Distinct from the same-function CEI bug the `ReentrancyDetector` catches:
+    here the reentered call targets a *different* function in the same
+    contract that mutates a storage slot the in-flight (calling) function
+    read before its external CALL. The canonical shape is `withdraw()` that
+    SLOADs `balance` and forwards ether, while a sibling `transfer()` SSTOREs
+    `balance` without ever making an external call of its own. An attacker
+    reenters via `transfer()` during withdraw's call and acts on stale state
+    — the same DAO-class fund-drain, but the writer lives on a different
+    selector dispatch path. The base detector does not fire on this shape
+    because the SSTORE to the read slot never appears on the calling path.
+
+    Bytecode-level discrimination (no symbolic call-graph required):
+
+      * Per-path tracking, accumulated during `inspect`:
+          - per-state sets `sloads_seen` (reused from the base detector)
+            and `sstores_seen` (added by this detector) — the slot
+            identities read and written on the current path so far;
+          - on a value-forwarding CALL/CALLCODE/DELEGATECALL: snapshot the
+            pre-call reads and pre-call writes for that interaction site;
+          - on an SSTORE: record the slot identity in a contract-wide
+            `_writer_slots` set — every storage slot the bytecode is
+            *capable* of writing on some reachable path is a candidate
+            sibling-writer for the cross-function gadget;
+          - on an SSTORE *after* a CALL (state.call_checkpoint already
+            set) whose slot is in this path's `sloads_before_call`:
+            remember the call pc as a same-function CEI site so finalize
+            can suppress it (the base ReentrancyDetector covers it).
+
+      * `finalize` (after every path is explored): for each call record
+        whose pre-call reads intersect `_writer_slots` AND whose pre-call
+        WRITES do NOT cover the intersection (the calling function did
+        not itself update the slot before forwarding control — no CEI
+        fix), and whose call pc is not in the same-function CEI set,
+        emit a finding at the CALL pc.
+
+    The "pre-call writes" gate is the cross_safe discriminator: a calling
+    function that SSTOREs its pre-read slot *before* the CALL has applied
+    the CEI fix on its own path. A reentered sibling can still mutate the
+    slot, but it cannot make the in-flight caller act on stale state. This
+    is precisely the same correctness boundary the base detector enforces
+    for the same-function case — recast for the cross-function geometry.
+
+    [Worker decision: emit at the CALL pc rather than the sibling SSTORE pc.
+    The CALL is the *fixable* site (the calling function must update its
+    pre-read slots before forwarding control, or apply a reentrancy guard);
+    the sibling SSTORE is *correct* in isolation and is only dangerous in
+    combination with the unguarded calling function. Reporting at the
+    interaction site mirrors what `ReentrancyDetector` already does for the
+    same-function CEI bug, keeps the two reentrancy categories triage-
+    aligned (both point at the CALL), and avoids over-reporting the sibling
+    once per dangerous calling function.]
+
+    [Worker decision: writer paths must be free of *any* external CALL, not
+    merely free of a post-SLOAD CALL. The discriminating signal is "this
+    function is a pure state mutator a reentered call can invoke" — and the
+    soundest, model-robust witness of that on the coarse bytecode-only view
+    is the entire absence of an external interaction on the writer path. A
+    writer path that itself contains a CALL is either (a) a same-function
+    CEI candidate the base detector already covers, or (b) a more complex
+    multi-function interleaving outside this detector's low-FP envelope.]
+    """
+
+    category = "reentrancy_cross_function"
+
+    _CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL")
+
+    def __init__(self):
+        super().__init__()
+        # per-call-site records collected when a value-forwarding CALL is
+        # executed; resolved against `_writer_slots` in finalize.
+        self._call_records = []
+        # call_pcs that were also flagged by the same-function CEI pattern
+        # (an SSTORE-after-CALL on the same path to a pre-call-read slot —
+        # the base ReentrancyDetector's territory). Suppressed in finalize
+        # to keep the two reentrancy categories cleanly disjoint.
+        self._same_function_cei_pcs = set()
+        # every slot identity the bytecode is *capable* of SSTOREing on
+        # some reachable path. Acts as the sibling-writer existence proof:
+        # for a cross-function gadget to be reachable, the slot the
+        # calling function reads must be writable somewhere in the
+        # contract. (A slot no one writes is reentrancy-immune.)
+        self._writer_slots = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        op = instruction.mnemonic
+        if op == "SLOAD":
+            if state.stack:
+                state.sloads_seen.add(_slot_key(state.stack[-1]))
+            return
+        if op in self._CALL_OPS:
+            # Open a per-path call checkpoint independently of the base
+            # ReentrancyDetector so this detector works whether or not the
+            # base detector is also registered (e.g. when invoked alone via
+            # `--check reentrancy-cross-function`). Idempotent with the
+            # base detector's own checkpoint update.
+            if not state.call_checkpoint:
+                state.call_checkpoint = True
+                state.sloads_before_call = set(state.sloads_seen)
+                state.sstores_before_call = set(state.sstores_seen)
+            state.last_call_pc = instruction.pc
+            self._call_records.append(
+                {
+                    "pre_call_reads": frozenset(state.sloads_seen),
+                    "pre_call_writes": frozenset(state.sstores_seen),
+                    "call_pc": instruction.pc,
+                    "op": op,
+                    "state": state,
+                    "instruction": instruction,
+                }
+            )
+            return
+        if op == "SSTORE":
+            if not state.stack:
+                return
+            slot = _slot_key(state.stack[-1])
+            state.sstores_seen.add(slot)
+            self._writer_slots.add(slot)
+            if state.call_checkpoint and slot in state.sloads_before_call:
+                # base detector's same-function CEI fires here too. The CALL
+                # forks state, so the post-call branch is a *different*
+                # MachineState object than the one inspected at CALL time —
+                # use the path-propagated `last_call_pc` (set on CALL,
+                # carried through `clone`) to identify the same-function
+                # call site to suppress in finalize.
+                if state.last_call_pc != -1:
+                    self._same_function_cei_pcs.add(state.last_call_pc)
+
+    def finalize(self, vm) -> None:
+        if not self._writer_slots or not self._call_records:
+            return
+        emitted_pcs = set()
+        for rec in self._call_records:
+            call_pc = rec["call_pc"]
+            if call_pc in self._same_function_cei_pcs:
+                continue
+            if call_pc in emitted_pcs:
+                continue
+            shared = rec["pre_call_reads"] & self._writer_slots
+            if not shared:
+                continue
+            # CEI-fixed-by-caller suppression: if every shared slot was
+            # already written by the calling function *before* the CALL,
+            # the reentered sibling cannot make the in-flight caller act
+            # on stale state — no cross-function bug at this site.
+            if shared <= rec["pre_call_writes"]:
+                continue
+            emitted_pcs.add(call_pc)
+            self.findings.append(
+                _finding(self.category, rec["state"], rec["instruction"], vm)
+            )
 
 
 class AccessControlEscalationDetector(DetectorHook):
@@ -2337,6 +2497,7 @@ DETECTOR_REGISTRY = {
     "ether-leak": EtherLeakDetector,
     "storage-write": StorageWriteDetector,
     "reentrancy": ReentrancyDetector,
+    "reentrancy-cross-function": CrossFunctionReentrancyDetector,
     "access-control": AccessControlEscalationDetector,
     "tx-origin": TxOriginAuthDetector,
     "delegatecall": DelegatecallUntrustedDetector,
