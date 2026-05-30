@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -756,6 +756,53 @@ overwhelmingly common case of an external contract call), and a
 that never calls `ECRECOVER` produces no finding regardless of whether it
 reads `CHAINID`. Safe designs use EIP-712 with a chain-bound domain
 separator, or otherwise bind `block.chainid` into the signed payload.
+
+### `signature-malleability` — signature malleability (SWC-117)
+
+```bash
+oracle --contract tests/fixtures/signature-malleability-vuln.sol \
+       --input-type sol --check signature-malleability --max-depth 64 --format json
+```
+
+Flags a contract that uses `ecrecover(...)` to authenticate without enforcing
+the EIP-2 lower-`s`-half bound (`category: "signature_malleability"`, severity
+`medium`). An ECDSA signature over secp256k1 is malleable: for every valid
+`(v, r, s)` the negation `(v', r, n-s)` is also a valid signature for the
+same message and the same signer. A contract that uses raw signature bytes
+as an identity — a `mapping(bytes32 => bool) usedSigs` keyed on
+`keccak256(sig)`, an off-chain relayer queue keyed on `(v, r, s)`, or any
+deduplication invariant on signature bytes — is broken by this property: an
+attacker mints the malleated twin of any authorised signature and replays
+the action under a fresh signature identity (SWC-117, "Signature
+Malleability"). The fix codified by EIP-2 and standardised by OpenZeppelin's
+ECDSA library is to constrain `s` to `[1, secp256k1n/2]`, making each valid
+signature uniquely representable.
+
+The discriminating signal is a **bytecode-level conjunction** (mirroring
+`signature-replay`'s structural impossibility approach, applied to a
+different absent signal): the contract reaches a `STATICCALL` (or `CALL`)
+whose concrete target address is `1` (the ECRECOVER precompile) **and** the
+contract's disassembly contains no PUSH-family immediate equal to
+`secp256k1n/2`
+(`0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0`). The
+absence of that constant is a hard impossibility proof: the canonical EIP-2
+bound check cannot be present without materialising the bound. The presence
+of the constant *anywhere* in the bytecode is enough to acquit (even if a
+specific path does not happen to compare against it, the contract has the
+*capacity* to enforce the bound).
+`signature-malleability-vuln.sol`'s `claim(...)` recovers a signer with no
+`s`-bound check and is flagged. `signature-malleability-safe.sol`'s
+`claim(...)` adds `require(uint256(s) <= secp256k1n/2)` before the
+`ecrecover` and is clean — proving the detector keys on the **absence** of
+the bound constant alongside the `ecrecover`, not on the `ecrecover` call
+alone.
+
+A `STATICCALL` / `CALL` to a concrete address other than `1`, a symbolic
+target, and a contract that never calls `ECRECOVER` are not flagged.
+Deliberately distinct from `signature-replay` (SWC-121, missing `CHAINID`):
+the two detectors fire on the same call sink for orthogonal bugs with
+orthogonal remediations — a contract can bind to the chain but still accept
+malleable signatures, and vice versa.
 
 ### bytecode input (no solc)
 

@@ -44,6 +44,7 @@ SEVERITY = {
     "prevrandao_randomness": "medium",
     "write_arbitrary_storage": "high",
     "signature_replay": "high",
+    "signature_malleability": "medium",
 }
 
 
@@ -1686,6 +1687,163 @@ class SignatureReplayDetector(DetectorHook):
         self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+# half of the secp256k1 curve order — the upper bound on a non-malleable
+# signature `s` value. Any contract that rejects malleable signatures must
+# compare `s` against this exact 256-bit constant (EIP-2 / SEC 1 §4.1.4).
+# OpenZeppelin's ECDSA library, Solady, and Solidity's own assembly all
+# materialise the bound as a `PUSH32 0x7FFF...20A0` literal in the runtime
+# bytecode. Its *absence* from the disassembly is a structural impossibility
+# proof that no malleability bound check exists in the contract.
+_SECP256K1_HALF_N = (
+    0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+)
+
+
+class SignatureMalleabilityDetector(DetectorHook):
+    """Detects missing signature-malleability protection (SWC-117, "Signature
+    Malleability").
+
+    An ECDSA signature over secp256k1 is a triple `(v, r, s)`. The curve is
+    symmetric: for every valid `(v, r, s)` the negation `(v', r, n-s)` (with
+    `v` flipped) is **also a valid signature for the same message and the
+    same signer**. An attacker who has any valid signature can therefore mint
+    a second, bit-different signature that ECRECOVER will accept just as
+    readily — a problem for any contract that uses the signature bytes
+    themselves as an identity (e.g. a `mapping(bytes32 => bool) usedSigs`
+    nonce-set keyed on `keccak256(sig)`, or a deduplication check based on
+    the raw `(v,r,s)` triple, or any external relayer / off-chain queue that
+    treats sig bytes as a unique identifier). The canonical fix, codified by
+    EIP-2 and standardised by OpenZeppelin's ECDSA library, is to constrain
+    `s` to the lower half of the curve order: reject any signature whose
+    `s > secp256k1n/2`. With that bound the malleated twin is uniquely
+    represented and the dedup invariant holds.
+
+    Detection signal — a bytecode-level conjunction (mirrors the SWC-121
+    SignatureReplayDetector's structural impossibility approach):
+
+      1. The contract REACHES a low-level call opcode (`STATICCALL` is the
+         Solidity-emitted form since Byzantium; `CALL` covers pre-Byzantium
+         / hand-rolled assembly) whose target address is the **concrete
+         value `0x0000...0001`** — the ECRECOVER precompile address.
+         Solidity emits `ecrecover(...)` as `staticcall(gas, 1, in, insz,
+         out, outsz)` with the `1` as a `PUSH1 0x01` literal, so the target
+         is reliably a concrete BitVec at inspect time.
+
+      2. AND the contract's disassembly contains **no PUSH32 immediate
+         equal to `secp256k1n/2`
+         (`0x7FFF...5D576E7357A4501DDFE92F46681B20A0`)** anywhere — so the
+         contract cannot possibly enforce the EIP-2 lower-`s`-half malleability
+         bound.
+
+    The constant `secp256k1n/2` is the unique mathematical bound for the
+    malleability check; every well-formed implementation materialises it as
+    a PUSH32 literal (or as a PUSH variant of fewer bytes that the
+    disassembler still records the same integer operand for). The presence
+    of the literal *anywhere* in the bytecode is enough to acquit the
+    contract: even if a specific path does not happen to compare against
+    it, the contract has the *capacity* to enforce the bound. The absence
+    of the literal is a hard impossibility proof, sound on the absence
+    side and conservative on the presence side — the same threshold the
+    SWC-121 detector applies to CHAINID.
+
+    A `STATICCALL` / `CALL` to a concrete address other than `1` — the
+    overwhelmingly common case of an external contract call — is not
+    flagged, and a `STATICCALL` whose target is symbolic (so cannot be
+    statically identified as ECRECOVER) is also not flagged. A contract
+    that never calls ECRECOVER produces no finding regardless of whether
+    it materialises the bound. The check is silent on contracts that
+    happen to PUSH `secp256k1n/2` for some unrelated reason, and on
+    contracts that use an `s`-range check that does not key off the
+    canonical EIP-2 bound — both are conservative trade-offs that
+    preserve the impossibility-proof contract.
+
+    The detector caches the bytecode-level bound presence on the `vm` once
+    (the bytecode does not change across paths) and dedupes per ECRECOVER
+    call site (one finding per pc across all paths). No engine refactor,
+    no new dependency.
+
+    Reuses the `SignatureReplayDetector`'s concrete-ECRECOVER-target test
+    and structural-impossibility approach, applied to a different absent
+    bytecode signal: SWC-121 keys on missing CHAINID (the chain-bind
+    fix), SWC-117 keys on missing secp256k1n/2 (the malleability-bound
+    fix). The two detectors fire on the same call-site sink (ECRECOVER)
+    but for orthogonal bugs with orthogonal remediations — a contract can
+    bind to the chain but still accept malleable signatures (so SWC-117
+    fires but SWC-121 stays silent), and vice versa.
+
+    [Worker decision: the discriminator is the bytecode-level absence of
+    the EIP-2 bound constant rather than a path-constraint signal because
+    the bug is a *structural* impossibility — the contract demonstrably
+    cannot enforce the malleability bound if the canonical constant is
+    not materialised anywhere in its runtime code — and a constraint-walk
+    over the ecrecover output would require modelling the precompile's
+    return value as it flows from memory into a subsequent comparison
+    against `s`, which oracle's coarse memory model does not track
+    precisely. The "zero PUSH32 0x7FFF...20A0 immediates" signal is sound
+    on the absence side (no constant means no canonical bound check is
+    possible) and conservative on the presence side (the constant being
+    present does not guarantee correct use, but it removes the
+    impossibility proof, which is the threshold for a high-confidence
+    SWC-117 finding). This is the exact same impossibility-proof pattern
+    that R31's SWC-121 detector pioneered — the only new machinery is a
+    PUSH-immediate scan instead of an opcode-mnemonic scan, since the
+    SWC-117 signal lives in PUSH data rather than in an opcode itself.]
+    """
+
+    category = "signature_malleability"
+
+    # Same scope as the SWC-121 detector: STATICCALL is the Solidity-emitted
+    # form for `ecrecover(...)` since Byzantium; CALL covers pre-Byzantium /
+    # hand-rolled assembly. DELEGATECALL/CALLCODE cannot reach a precompile
+    # usefully in the Solidity-source sense and are intentionally out of scope.
+    _OPS = ("STATICCALL", "CALL")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._OPS:
+            return
+        # Stack layout (top→):
+        #   STATICCALL: gas, addr, argsOff, argsLen, retOff, retLen
+        #   CALL:       gas, addr, value, argsOff, argsLen, retOff, retLen
+        # In both cases addr = stack[-2].
+        if len(state.stack) < 2:
+            return
+        target_val = _concrete_val(state.stack[-2])
+        if target_val != _ECRECOVER_ADDR:
+            return  # symbolic target or some non-precompile address
+        if _has_secp256k1_half_n(vm):
+            return  # bytecode can enforce the EIP-2 malleability bound
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
+def _has_secp256k1_half_n(vm) -> bool:
+    """True if the disassembled bytecode contains a PUSH-family immediate
+    whose 256-bit value equals `secp256k1n/2` — the EIP-2 / SWC-117
+    malleability bound.
+
+    Cached on the vm instance — the bytecode does not change across paths,
+    so a single linear scan amortises to O(1) across the run. A bytecode
+    without this exact constant demonstrably cannot enforce the canonical
+    lower-`s`-half malleability check, which is the SWC-117 impossibility
+    signal.
+    """
+    cached = getattr(vm, "_secp_half_n_present", None)
+    if cached is not None:
+        return cached
+    present = any(
+        getattr(i, "operand", None) == _SECP256K1_HALF_N
+        for i in vm.disasm.instructions
+    )
+    vm._secp_half_n_present = present
+    return present
+
+
 def _has_chainid_opcode(vm) -> bool:
     """True if the disassembled bytecode contains the CHAINID opcode anywhere.
 
@@ -1893,4 +2051,5 @@ DETECTOR_REGISTRY = {
     "prevrandao-randomness": PrevrandaoRandomnessDetector,
     "write-arbitrary-storage": WriteArbitraryStorageDetector,
     "signature-replay": SignatureReplayDetector,
+    "signature-malleability": SignatureMalleabilityDetector,
 }
