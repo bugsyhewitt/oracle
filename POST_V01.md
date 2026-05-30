@@ -1224,6 +1224,125 @@ dependency.
 
 ---
 
+### 27. Cross-chain-signature-replay detector (SWC-121) ✅ IMPLEMENTED (Phase 2, Rotation 31)
+
+**Status:** Shipped. Added `SignatureReplayDetector` (category
+`signature_replay`, severity `high`, CLI token `signature-replay`) — the next
+new *bug class* of Phase 2. It flags a contract that authenticates via
+`ecrecover(...)` over a payload that does **not** include `block.chainid` —
+SWC-121, "Missing Protection against Signature Replay Attacks" (the
+cross-chain replay half of SWC-121; the same-chain nonce-reuse half is already
+covered by the application-level `usedNonces` pattern the fixtures
+demonstrate). Without a chain-identifier in the signed hash a well-formed
+signature is valid bit-for-bit on every chain the contract is deployed on, so
+an attacker lifts a signature off one chain and replays it on another
+(Ethereum mainnet → a fork chain, an L1 → an L2 mirror, or any post-fork
+wallet → its pre-fork twin — the canonical post-DAO-fork drain class).
+EIP-155 + EIP-1344 introduced `CHAINID` (opcode `0x46`, Solidity's
+`block.chainid`) for exactly this remediation.
+
+The discriminating signal is a **bytecode-level conjunction**: the contract
+(1) reaches a `STATICCALL` (Solidity-emitted form since Byzantium) or `CALL`
+whose **concrete target address is `1`** — the ECRECOVER precompile address
+— and (2) the contract's disassembly contains **no `CHAINID` opcode anywhere**
+at all. The absence of `CHAINID` is a hard impossibility proof: a contract
+with zero `CHAINID` opcodes in its bytecode demonstrably cannot incorporate
+the chain id into any signed payload, a structural model-robust signal. A
+`CHAINID` *anywhere* in the bytecode is enough to acquit the contract: even
+if a specific path does not happen to read it, the contract has the *capacity*
+to bind chain context (e.g. a cached EIP-712 domain separator computed once
+at deploy time compiles to a single `CHAINID` followed by an `SLOAD` per
+call). This keeps the false-positive rate low without modelling ECRECOVER's
+precompile semantics, the contract's hash construction, or the cross-call
+data-flow from the signed bytes into the call buffer — none of which oracle's
+coarse memory model tracks precisely.
+
+Reuses the `DelegatecallUntrustedDetector`'s concrete-target inspection
+applied to the STATICCALL/CALL target, with the direction inverted: SWC-112
+flags an attacker-CONTROLLED target, SWC-121 flags a known-precompile target
+alongside an absent chain bind. The CHAINID-presence scan is cached on the
+`vm` once (the bytecode does not change across paths) and per-pc dedupes
+report each ECRECOVER call site exactly once across paths. A `STATICCALL` /
+`CALL` to a concrete address other than `1` (the overwhelmingly common
+case), and a `STATICCALL` / `CALL` whose target is symbolic (so cannot be
+statically identified as ECRECOVER), are not flagged; a contract that never
+calls ECRECOVER produces no finding regardless of whether it reads
+`CHAINID`. Deliberately distinct from SWC-114 transaction-order
+(`tx.gasprice`-gated ordering) and the SWC-117 signature-malleability class
+(`s`-value bounds): SWC-121's bug is the *absent chain bind*, witnessed
+structurally in the bytecode, with its own remediation (include
+`block.chainid` in the signed payload, or use EIP-712 with a chain-bound
+domain separator). No engine refactor, no new dependency.
+
+The report `_TITLE` map gains `Missing Chain Bind for Signature (SWC-121)`
+so h1md headings and SARIF rule descriptions render properly; high severity
+is already handled by the SARIF level / security-severity maps. Tests:
+`tests/test_signature_replay.py` (21 default + 2 slow real-Z3) cover
+registry/CLI registration, severity, the `_has_chainid_opcode` helper +
+caching, fixture opcode presence (vuln has STATICCALL no CHAINID; safe has
+both), vulnerable-flagged / safe-clean at both the detector and end-to-end
+layers, the per-pc dedupe, three false-positive guards (external call to a
+non-precompile target, delegatecall, a contract that makes no external call
+at all), two cross-detector separation tests (SWC-112 delegatecall and
+SWC-114 tx-order do not claim the SWC-121 fixture), participation in an
+`all`-checks run, and h1md + SARIF rendering. Two new fixtures:
+`signature-replay-vuln.sol` (`claim(...)` recovers a signer over a hash
+that omits `block.chainid` — flagged) and `signature-replay-safe.sol`
+(`claim(...)` recovers a signer over a hash that includes `block.chainid`
+— the STATICCALL to address `1` is still present, so the test proves the
+detector keys on the absence of CHAINID alongside the ecrecover, not on the
+ecrecover call alone).
+
+**Why it matters:** Cross-chain signature replay is a named SWC entry
+(SWC-121), on every audit checklist, and the root cause of a long tail of
+post-fork wallet drains, L1↔L2 mirror exploits, and multi-chain dapp
+incidents — every place a signature produced for one chain remains valid on
+another. It was a visible gap in oracle's detector set (no prior detector
+keyed on signature handling or on the ECRECOVER precompile sink). Prior
+rotations had explicitly deferred SWC-121 and SWC-122 as "considered but
+require ECRECOVER / precompile modelling that oracle does not currently
+implement" (see the Rotation 30 SWC-124 verification, lines 1316-1319). On
+re-assessment for Rotation 31 the cross-chain-replay surface of SWC-121
+admits a sound bytecode-level signal — the structural CHAINID-absence
+impossibility proof — that does NOT require modelling ECRECOVER's
+precompile semantics at all: only that ECRECOVER is *called* (a concrete
+target-address check) and that the bytecode has no `CHAINID` opcode to bind
+the signed payload to its chain. That signal sits entirely within the
+existing detector framework, with zero engine refactor and no new
+dependency — exactly the same self-contained-detector play that shipped
+Rotations 13-30.
+
+**Verification of prior state (per roster instruction):** the roster called
+for assessing SWC-121 (signature replay) or SWC-122 (improper signature
+verification) and verifying which (if either) was already shipped. A repo-
+wide grep for `SWC-121`, `SWC-122`, `ecrecover`, `ECRECOVER`, `signature
+replay`, and `chain id` confirmed: no detector for either SWC; no ECRECOVER
+opcode/precompile handler; CHAINID (opcode `0x46`) is handled by the VM
+(`_op_chainid`); the only prior mentions of SWC-121/SWC-122 are the
+explicit deferrals in the Rotation 30 SWC-124 verification note. The
+roster's POST_V01.md staleness clause specifically called this out:
+"POST_V01.md may be stale. Pick the best unimplemented gap and implement
+it. Document any pivot in your PR description." Both assessed options
+remained open; **SWC-121 was selected over SWC-122** because the
+cross-chain replay surface admits a clean *structural* bytecode signal (the
+CHAINID-absence impossibility proof) that needs no ECRECOVER semantics
+modelling, whereas SWC-122 ("improper verification" — failing to check the
+ecrecover return value against a known signer / against the
+recovered-address-equals-zero failure mode) genuinely requires modelling the
+precompile's *output* (the recovered address in memory after the
+STATICCALL) and tracking its flow into a subsequent comparison, which
+oracle's coarse memory model does not precisely track. SWC-121 is the
+higher-feasibility, lower-false-positive fit. This is the assessed "#22+"
+gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a concrete
+ECRECOVER call site without any CHAINID in the bytecode (reusing the
+concrete-target inspection from the delegatecall detector and a one-line
+disassembly scan cached on the vm), one CHAINID-presence helper, a report
+title, two fixtures. No engine refactor, no new dependency.
+
+---
+
 ### 26. Write-arbitrary-storage detector (SWC-124) ✅ IMPLEMENTED (Phase 2, Rotation 30)
 
 **Status:** Shipped. Added `WriteArbitraryStorageDetector` (category

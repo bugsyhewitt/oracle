@@ -43,6 +43,7 @@ SEVERITY = {
     "arbitrary_jump": "high",
     "prevrandao_randomness": "medium",
     "write_arbitrary_storage": "high",
+    "signature_replay": "high",
 }
 
 
@@ -1566,6 +1567,143 @@ class WriteArbitraryStorageDetector(DetectorHook):
         self.findings.append(_finding(self.category, state, instruction, vm))
 
 
+# Precompile address of ECRECOVER (signature recovery), per the Yellow Paper.
+_ECRECOVER_ADDR = 1
+
+# Opcode mnemonic for CHAINID (EIP-1344, 0x46), Solidity's `block.chainid`.
+_CHAINID_MNEMONIC = "CHAINID"
+
+
+class SignatureReplayDetector(DetectorHook):
+    """Detects cross-chain signature replay (SWC-121, "Missing Protection
+    against Signature Replay Attacks").
+
+    The classic SWC-121 bug is a contract that authenticates an action via
+    `ecrecover(...)` over a payload that does **not** bind the signature to
+    this deploy chain. Without a chain-identifier in the signed hash a
+    well-formed signature is valid bit-for-bit on every chain the contract is
+    deployed on, so an attacker can lift a signature off one chain and replay
+    it on another (Ethereum mainnet → a fork chain, an L1 → an L2 mirror, or
+    any post-fork wallet → its pre-fork twin — the canonical post-DAO-fork
+    drain class). EIP-155 + EIP-1344 introduced `CHAINID` (opcode 0x46,
+    Solidity's `block.chainid`) for exactly this remediation: include it in
+    the signed payload and the signature only verifies on the chain that
+    produced it.
+
+    Detection signal — a bytecode-level conjunction:
+
+      1. The contract REACHES (executes on at least one path) a low-level call
+         opcode (`STATICCALL` is the Solidity-emitted form; `CALL` covers the
+         pre-Byzantium pattern) whose target address is the **concrete value
+         `0x0000...0001`** — the ECRECOVER precompile address. Solidity
+         emits `ecrecover(...)` as `staticcall(gas, 1, in, insz, out, outsz)`
+         with the `1` as a `PUSH1 0x01` literal, so the target is reliably a
+         concrete BitVec at inspect time.
+
+      2. AND the contract's disassembly contains **no `CHAINID` opcode
+         anywhere** — so the contract cannot possibly bind the signed payload
+         to its deploy chain.
+
+    A `CHAINID` *anywhere* in the bytecode is enough to acquit the contract:
+    even if a specific path does not happen to read it, the contract has the
+    capacity to bind chain context (e.g. an `__INIT_DOMAIN_SEPARATOR()` that
+    runs once and caches a chain-bound domain separator in storage compiles
+    to a single CHAINID at deploy time and an SLOAD per call). Conversely,
+    the *absence* of CHAINID is a hard impossibility result: a contract with
+    zero CHAINID opcodes in its bytecode demonstrably cannot incorporate the
+    chain id into any signed payload — a structural, model-robust signal. This
+    keeps the false-positive rate low without modelling ECRECOVER's
+    precompile semantics, the contract's hash construction, or the
+    cross-call data-flow from the signed bytes into the call buffer.
+
+    A `STATICCALL` / `CALL` to a concrete address other than 1 — the
+    overwhelmingly common case of an external contract call — is not flagged,
+    and a `STATICCALL` whose target is symbolic (so cannot be statically
+    identified as ECRECOVER) is also not flagged. A contract that never calls
+    ECRECOVER produces no finding regardless of whether it reads CHAINID.
+
+    The detector caches the bytecode-level CHAINID presence on the `vm` once
+    (it cannot change across paths) and dedupes per ECRECOVER call site
+    (one finding per pc across all paths). No engine refactor, no new
+    dependency. Reuses the concrete-target inspection the
+    `DelegatecallUntrustedDetector` (SWC-112) applies to its delegatecall
+    target, applied here to the STATICCALL/CALL target instead, with the
+    direction inverted: SWC-112 flags an attacker-CONTROLLED target,
+    SWC-121 flags a known-precompile target alongside an absent chain bind.
+
+    This is deliberately distinct from the SWC-114 transaction-order
+    detector (`tx.gasprice`-gated ordering) and the SWC-117 signature-
+    malleability class (`s`-value bounds): SWC-121's bug is the *absent
+    chain bind*, witnessed structurally in the bytecode, with its own
+    remediation (include `block.chainid` in the signed payload, or use
+    EIP-712 with a chain-bound domain separator).
+
+    [Worker decision: the discriminator is a bytecode-level static signal
+    rather than a path-constraint signal because the bug is a *structural*
+    impossibility — the contract demonstrably cannot bind the signed payload
+    to its chain — and a constraint-walk over the ecrecover output would
+    require modelling the precompile's return (the recovered address) as it
+    flows from memory back into a comparison, which oracle's coarse memory
+    model does not track precisely. The "zero CHAINID opcodes in the
+    bytecode" signal is sound on the absence side (no opcode means no chain
+    bind is possible) and conservative on the presence side (a CHAINID
+    opcode does not guarantee correct use, but it removes the impossibility
+    proof, which is the threshold for a high-confidence SWC-121 finding).
+    This mirrors the WriteArbitraryStorageDetector's concrete/symbolic
+    discrimination — both ride the cheap, model-robust signal available
+    without engine changes.]
+    """
+
+    category = "signature_replay"
+
+    # STATICCALL is the Solidity-emitted form for `ecrecover(...)` since the
+    # Byzantium fork; CALL is included for pre-Byzantium / hand-rolled
+    # assembly. DELEGATECALL/CALLCODE cannot reach a precompile usefully in
+    # the Solidity-source sense and are intentionally out of scope.
+    _OPS = ("STATICCALL", "CALL")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._OPS:
+            return
+        # Stack layout (top→):
+        #   STATICCALL: gas, addr, argsOff, argsLen, retOff, retLen
+        #   CALL:       gas, addr, value, argsOff, argsLen, retOff, retLen
+        # In both cases addr = stack[-2].
+        if len(state.stack) < 2:
+            return
+        target_val = _concrete_val(state.stack[-2])
+        if target_val != _ECRECOVER_ADDR:
+            return  # symbolic target or some non-precompile address
+        if _has_chainid_opcode(vm):
+            return  # bytecode can bind a signature to its chain
+        if instruction.pc in self._flagged_pcs:
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
+def _has_chainid_opcode(vm) -> bool:
+    """True if the disassembled bytecode contains the CHAINID opcode anywhere.
+
+    Cached on the vm instance — the bytecode does not change across paths,
+    so a single linear scan amortises to O(1) across the run. A bytecode
+    without CHAINID demonstrably cannot incorporate `block.chainid` into any
+    signed payload, which is the SWC-121 impossibility signal.
+    """
+    cached = getattr(vm, "_chainid_present", None)
+    if cached is not None:
+        return cached
+    present = any(
+        i.mnemonic == _CHAINID_MNEMONIC for i in vm.disasm.instructions
+    )
+    vm._chainid_present = present
+    return present
+
+
 def _mentions_call_result(bv) -> bool:
     """True if the bitvec value is (or is derived from) a call opcode's success
     word. oracle mints that word as `callretval_<pc>` (CALL/CALLCODE) or
@@ -1754,4 +1892,5 @@ DETECTOR_REGISTRY = {
     "arbitrary-jump": ArbitraryJumpDetector,
     "prevrandao-randomness": PrevrandaoRandomnessDetector,
     "write-arbitrary-storage": WriteArbitraryStorageDetector,
+    "signature-replay": SignatureReplayDetector,
 }
