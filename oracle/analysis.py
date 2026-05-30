@@ -232,6 +232,8 @@ def compute_coverage(
             for f in factories:
                 vm.register(f())
             vm.run()
+            for det in vm.detectors:
+                det.finalize(vm)
             visited |= vm.visited_pcs
             if tx_index + 1 < sequence_depth:
                 for term in vm.terminal_states[:MAX_SEQUENCE_FANOUT]:
@@ -283,6 +285,8 @@ def _explore_sequence(bytecode, factories, max_depth, sequence_depth):
                 vm.register(det)
             vm.run()
 
+            for det in detectors:
+                det.finalize(vm)
             for det in detectors:
                 candidates.extend(det.findings)
 

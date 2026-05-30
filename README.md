@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,insufficient-gas-griefing,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,reentrancy-cross-function,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,insufficient-gas-griefing,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -264,6 +264,26 @@ storage slot is `SLOAD`ed, an external `CALL`/`CALLCODE`/`DELEGATECALL` hands
 control to a potentially re-entrant callee, and only *after* the call is that
 same slot `SSTORE`d. The correct check-effects-interactions ordering
 (`SSTORE` before the call, as in `reentrancy_safe.sol`) is **not** flagged.
+
+### `reentrancy-cross-function` — cross-function reentrancy (SWC-107)
+
+```bash
+oracle --contract tests/fixtures/reentrancy_cross_vuln.sol \
+       --input-type sol --check reentrancy-cross-function --format json
+```
+
+Flags the cross-function variant of SWC-107 reentrancy
+(`category: "reentrancy_cross_function"`): the calling function reads a
+storage slot, forwards control via an external `CALL`/`CALLCODE`/`DELEGATECALL`,
+and does **not** update that slot itself before the call — but a **sibling
+function** (a state mutator with no external call of its own) *can* write the
+slot. A reentered call into the sibling mutates state the in-flight caller
+already read, draining funds the same way the same-function CEI bug does but
+with the writer on a different selector dispatch path. The base `reentrancy`
+detector does not fire on this shape because the calling function never
+SSTOREs the read slot. The cross-function detector explicitly suppresses any
+call site already flagged by `reentrancy` so the two categories stay disjoint
+(no double-reporting).
 
 ### `access-control` — ownership / privilege escalation
 

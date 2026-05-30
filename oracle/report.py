@@ -34,6 +34,7 @@ _TITLE = {
     "unconstrained_ether_transfer": "Unconstrained Ether Transfer",
     "arbitrary_storage_write": "Arbitrary Storage Write",
     "reentrancy": "Reentrancy (check-effects-interactions violation)",
+    "reentrancy_cross_function": "Cross-Function Reentrancy (SWC-107)",
     "access_control_escalation": "Access Control Escalation",
     "tx_origin_authentication": "tx.origin Authentication (SWC-115)",
     "delegatecall_untrusted_callee": "Delegatecall to Untrusted Callee (SWC-112)",
