@@ -1562,6 +1562,116 @@ no new dependency.
 
 ---
 
+### 29. Insufficient-gas-griefing detector (SWC-126) ✅ IMPLEMENTED (Phase 2, Rotation 34)
+
+**Status:** Shipped. Added `InsufficientGasGriefingDetector` (category
+`insufficient_gas_griefing`, severity `medium`, CLI token
+`insufficient-gas-griefing`) — the next new *bug class* of Phase 2. It
+flags a `CALL` / `CALLCODE` / `STATICCALL` / `DELEGATECALL` whose gas
+operand on top of stack is symbolic and derived from calldata — the
+canonical SWC-126 relayer / forwarder / meta-tx griefing surface, where
+the caller controls the gas fraction forwarded to the inner call. A
+malicious relayer can pick a `gasAmt` small enough to OOG the inner call
+while the outer transaction succeeds (the signed message is recorded as
+consumed / the nonce burns / the queue position advances, but the
+intended inner action never executes) — that is the SWC-126 "insufficient
+gas griefing" bug class. The safe pattern forwards all remaining gas (no
+`{gas: ...}` modifier — Solidity emits the runtime `GAS` opcode, which
+lowers to a fresh `gas_<pc>` symbol with no calldata in its AST) or
+requires a minimum bound on the gas argument derived from the signed
+payload.
+
+The discriminating signal is the **symbolic origin** of the gas operand:
+a `_mentions_calldata` test on `stack[-1]` at the inspect hook. This is
+the same low-false-positive discriminator proven by `delegatecall`
+(SWC-112, calldata-derived target), `write-arbitrary-storage` (SWC-124,
+calldata-derived storage key), and `arbitrary-jump` (SWC-127,
+calldata-derived jump destination) — applied here to the gas word rather
+than to the target / key / destination. A concrete gas operand (the
+SWC-134 hardcoded-stipend surface, or any other compile-time constant)
+is not flagged: the gas amount is fixed by the contract author, not the
+caller, so it is not the SWC-126 griefing surface. A per-detector
+flagged-pc set reports each caller-gas call site at most once across
+paths. No engine refactor, no new dependency.
+
+The detector covers all four call-family ops — `CALL`, `CALLCODE`,
+`STATICCALL`, `DELEGATECALL` — because the SWC-126 griefing surface
+applies wherever the inner call can OOG without reverting the outer
+transaction (all four signal an inner failure as a 0 retval, not a
+revert). This is deliberately distinct from every other call-aware
+detector: SWC-134 (`hardcoded_gas_call`) keys on a `PUSH2 0x08FC` literal
+— the opposite end of the gas-operand spectrum (author-hardcoded, not
+caller-supplied); SWC-112 keys on a calldata-derived **target** rather
+than gas; SWC-104 / SWC-113 / SWC-105 key on the return word / loop
+boundedness / missing caller guard respectively. SWC-126 is the
+**caller-supplied gas amount** surface — orthogonal to all of them.
+
+The report `_TITLE` map gains `Insufficient Gas Griefing (SWC-126)` so
+h1md headings and SARIF rule descriptions render; medium severity is
+already handled by the SARIF level / security-severity maps. Tests:
+`tests/test_insufficient_gas_griefing.py` (25 default + 2 slow real-Z3)
+cover registry / CLI registration, severity, report-title mapping,
+fixture opcode + structure presence (vuln emits CALL with no GAS opcode
+preceding; safe emits CALL with GAS opcode preceding), the symbolic
+provenance probe (gas operand mentions calldata on vuln, does not on
+safe), detector-level vulnerable-flagged / safe-clean, per-call-site
+dedupe, end-to-end vuln / safe parity, seven false-positive guards
+(SWC-134 hardcoded-gas-vuln / hardcoded-gas-safe / SWC-105
+ether-withdrawal / reentrancy / SWC-104 unchecked-call / SWC-112
+delegatecall / no-call assertion-violation), two cross-detector
+separation tests (the SWC-126 fixture does not trip SWC-134 or
+SWC-113), participation in an `all`-checks run, and h1md + SARIF
+rendering. Two new fixtures: `insufficient-gas-griefing-vuln.sol`
+(`relay()` does `to.call{gas: gasAmt}(data)` with a calldata `gasAmt`)
+and `insufficient-gas-griefing-safe.sol` (`relay()` does
+`to.call(data)`, forwarding all remaining gas — CALL still present, so
+the test proves the detector keys on the gas operand's symbolic
+provenance, not on the CALL opcode itself).
+
+**Why it matters:** Insufficient gas griefing is a named SWC entry
+(SWC-126), on every audit checklist of any contract that accepts
+caller-relayed transactions (meta-transactions, ERC-2771 forwarders,
+gasless-UX wrappers, multi-call routers, GSN relayers, EIP-712 signed
+message executors). It was a visible gap in oracle's detector set —
+twenty-six detectors covering twenty-five SWC classes, none keying on
+the caller-supplied-gas surface — and the most-cited remaining gas-bug
+gap after SWC-134 (the author-hardcoded variant) shipped in Rotation
+33. It maps cleanly onto oracle's existing architecture — the same
+`_mentions_calldata` symbolic-provenance machinery the SWC-112 /
+SWC-124 / SWC-127 detectors use, applied to the gas operand — so it
+adds a named bug class with no engine refactor and no new dependency.
+
+**Verification of prior state (per roster instruction):** the roster
+called for assessing SWC-126 (insufficient gas griefing) or, if
+already shipped, SWC-128 (block-gas-limit DoS). A repo grep confirmed
+the state: SWC-128 already shipped (`BlockGasLimitDosDetector`,
+Rotation 19) — registry entry, fixtures, and report title all
+predate this rotation. SWC-126 had been deferred in Rotation 33's
+verification on the grounds that it "requires modelling the
+relationship between the caller's forwarded gas fraction and the
+sub-call's recipient-controllable revert" — but that framing assumed
+the returndata-bomb / 63-64-rule variant of SWC-126, where the
+*recipient* exhausts the forwarded gas. The relayer variant — where
+the *caller* underprovisions the gas — has a clean, model-robust
+symbolic signal that requires no such modelling: the gas operand
+either traces to calldata or it does not, and oracle's existing
+symbolic engine answers that question directly with the exact
+`_mentions_calldata` test already proven across three other shipped
+detectors. The relayer variant is the SWC registry's primary
+worked example for SWC-126 (the canonical meta-transaction griefing
+attack), so the named SWC entry is fully covered by the
+relayer-keyed detector. The returndata-bomb variant remains deferred
+on its original grounds (no clean symbolic signal in oracle's
+bounded model) and is appropriately out of scope here. This is the
+assessed "#24+" gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a symbolic
+provenance test (`_mentions_calldata`) on `stack[-1]` at each
+call-family site, a per-detector flagged-pc set, a report title, two
+fixtures. No engine refactor, no new dependency.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

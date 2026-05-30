@@ -52,6 +52,7 @@ _TITLE = {
     "signature_replay": "Missing Chain Bind for Signature (SWC-121)",
     "signature_malleability": "Signature Malleability (SWC-117)",
     "hardcoded_gas_call": "Message call with hardcoded gas amount (SWC-134)",
+    "insufficient_gas_griefing": "Insufficient Gas Griefing (SWC-126)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
