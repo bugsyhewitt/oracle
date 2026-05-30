@@ -55,6 +55,8 @@ CONTRACTS = {
     "prevrandao-randomness-safe.sol": "PrevrandaoRandomnessSafe",
     "signature-replay-vuln.sol": "SignatureReplayVuln",
     "signature-replay-safe.sol": "SignatureReplaySafe",
+    "hardcoded-gas-vuln.sol": "HardcodedGasVuln",
+    "hardcoded-gas-safe.sol": "HardcodedGasSafe",
 }
 
 

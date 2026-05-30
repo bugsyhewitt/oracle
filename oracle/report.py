@@ -51,6 +51,7 @@ _TITLE = {
     "write_arbitrary_storage": "Write to Arbitrary Storage Location (SWC-124)",
     "signature_replay": "Missing Chain Bind for Signature (SWC-121)",
     "signature_malleability": "Signature Malleability (SWC-117)",
+    "hardcoded_gas_call": "Message call with hardcoded gas amount (SWC-134)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
