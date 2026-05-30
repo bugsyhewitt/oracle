@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,insufficient-gas-griefing,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -847,6 +847,57 @@ recipient), `ether-withdrawal` (SWC-105, missing caller guard),
 `unchecked-call` (SWC-104, discarded return word), and `dos-failed-call`
 (SWC-113, loop-bound call): SWC-134 is a structural property of the gas
 operand, orthogonal to every other call-related check.
+
+### `insufficient-gas-griefing` — insufficient gas griefing (SWC-126)
+
+```bash
+oracle --contract tests/fixtures/insufficient-gas-griefing-vuln.sol \
+       --input-type sol --check insufficient-gas-griefing --max-depth 64 --format json
+```
+
+Flags a `CALL` / `CALLCODE` / `STATICCALL` / `DELEGATECALL` whose **gas
+operand** is symbolic and **derived from calldata** (`category:
+"insufficient_gas_griefing"`, severity `medium`). The canonical SWC-126
+surface is a relayer / forwarder / meta-tx contract: it accepts a target,
+a payload, and (critically) a gas amount from the caller and forwards the
+inner call with that caller-supplied gas. A malicious relayer can pick a
+`gasAmt` small enough to OOG the inner call while the outer transaction
+succeeds — the signed message is recorded as "consumed" / the nonce burns
+/ the queue position advances, but the intended inner action never
+executes. The relayer has griefed the user without ever rejecting the
+message outright (SWC-126, "Insufficient Gas Griefing"). The safe pattern
+forwards all remaining gas (no `{gas: ...}` modifier — Solidity emits the
+runtime `GAS` opcode, which lowers to a fresh symbol with no calldata in
+its AST) or requires a minimum bound on the gas argument derived from the
+signed payload.
+
+The discriminating signal is the symbolic origin of the gas operand on
+top of stack at the call site: a `_mentions_calldata` test, the same
+low-false-positive discriminator proven by `delegatecall` (SWC-112,
+calldata-derived target), `write-arbitrary-storage` (SWC-124,
+calldata-derived storage key), and `arbitrary-jump` (SWC-127,
+calldata-derived jump destination) — applied here to the gas word rather
+than to the target / key / destination. A **concrete** gas operand (the
+SWC-134 hardcoded-stipend surface, or any other compile-time constant) is
+not flagged: the gas amount is fixed by the contract author, not the
+caller, so it is not the SWC-126 griefing surface.
+`insufficient-gas-griefing-vuln.sol`'s `relay(to, gasAmt, data)` does
+`to.call{gas: gasAmt}(data)` and is flagged.
+`insufficient-gas-griefing-safe.sol`'s `relay(to, data)` does
+`to.call(data)`, forwarding all remaining gas — the `CALL` opcode is
+still present in the bytecode, proving the detector keys on the gas
+operand's symbolic provenance, not on the `CALL` opcode itself.
+
+Deliberately distinct from `hardcoded-gas` (SWC-134, author-hardcoded
+literal — the opposite end of the gas-operand spectrum),
+`delegatecall` (SWC-112, calldata-derived **target**),
+`ether-withdrawal` (SWC-105, missing caller guard),
+`unchecked-call` (SWC-104, discarded return word), and `dos-failed-call`
+(SWC-113, loop-bound call): SWC-126 is the **caller-supplied gas amount**
+surface, orthogonal to every other call-related check. A relayer can
+simultaneously be perfectly access-controlled, check its return word,
+call once outside any loop, and target a trusted constant address — yet
+still expose SWC-126 the moment its gas operand is a calldata argument.
 
 ### bytecode input (no solc)
 

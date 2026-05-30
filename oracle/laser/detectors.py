@@ -46,6 +46,7 @@ SEVERITY = {
     "signature_replay": "high",
     "signature_malleability": "medium",
     "hardcoded_gas_call": "medium",
+    "insufficient_gas_griefing": "medium",
 }
 
 
@@ -1887,6 +1888,119 @@ def _call_has_hardcoded_gas(vm, call_pc: int) -> bool:
     return has_stipend
 
 
+class InsufficientGasGriefingDetector(DetectorHook):
+    """Detects a message call whose gas operand is caller-supplied
+    (SWC-126, "Insufficient Gas Griefing").
+
+    The canonical SWC-126 surface is a relayer / forwarder / meta-tx
+    contract: it accepts a target, a payload, and (critically) a gas
+    amount from the caller, and forwards the inner call with that
+    caller-supplied gas. A malicious relayer can choose a `gasAmt` small
+    enough that the inner call OOGs while the outer transaction still
+    succeeds — the signed message is recorded as "consumed", the queue
+    position advances, the nonce burns, but the intended inner action
+    never executes. The relayer has griefed the user without ever
+    rejecting the message outright. This is the SWC registry's named
+    SWC-126; the safe pattern forwards all remaining gas (no
+    `{gas: ...}` modifier — Solidity emits the runtime `GAS` opcode) or
+    requires a minimum bound on the gas argument derived from the signed
+    payload.
+
+    Detection signal — the **gas operand** of `CALL` / `CALLCODE` /
+    `STATICCALL` / `DELEGATECALL` is symbolic and **derived from
+    calldata**. The call's stack layout puts the gas word on top
+    (`stack[-1]` for every call-family opcode), so the inspect hook
+    reads it directly before the instruction executes. A concrete gas
+    operand (the SWC-134 hardcoded-stipend pattern, or any other
+    compile-time constant) is *not* flagged: the gas amount is fixed by
+    the contract author, not the caller, so it is not the SWC-126
+    griefing surface. The runtime `GAS` opcode lowers to a fresh
+    `gas_<pc>` symbol that does not mention calldata, so the safe
+    forward-all-remaining-gas pattern is likewise not flagged. The
+    `_mentions_calldata` test is the same low-false-positive
+    discriminator proven by the SWC-112 (delegatecall-untrusted),
+    SWC-127 (arbitrary-jump), and SWC-124 (write-arbitrary-storage)
+    detectors — applied here to the gas operand rather than to the
+    target / jump-destination / storage-key.
+
+    The detector is deliberately distinct from every other call-aware
+    check. SWC-134 (`hardcoded_gas_call`) keys on a `PUSH2 0x08FC`
+    literal in the call's preceding window — the opposite end of the
+    gas-operand spectrum (author-hardcoded, not caller-supplied). SWC-112
+    (`delegatecall_untrusted_callee`) keys on a calldata-derived
+    *target* rather than gas. SWC-104 (`unchecked_call_return`) keys on
+    a discarded return word. SWC-113 (`dos_failed_call`) keys on a
+    loop-bound call. SWC-105 (`unprotected_ether_withdrawal`) keys on a
+    missing caller guard. SWC-126 is the **caller-supplied gas amount**
+    surface — orthogonal to all of them. A relayer can simultaneously
+    be perfectly access-controlled (no SWC-105), check its return word
+    (no SWC-104), call once outside any loop (no SWC-113), and target a
+    trusted constant address (no SWC-112) — yet still expose SWC-126 the
+    moment its gas operand is a calldata argument.
+
+    [Worker decision: the discriminator is the symbolic origin of the
+    gas operand (a `_mentions_calldata` test on `stack[-1]`) rather than
+    a static disassembly window like the SWC-134 sibling. SWC-134's
+    signal is a structural literal (`PUSH2 0x08FC`) that solc emits
+    verbatim — a static window is the model-robust read. SWC-126's
+    signal is the opposite: the gas argument's *symbolic provenance*,
+    which oracle's bounded-symbolic engine already tracks precisely on
+    every CALLDATALOAD (the same provenance the SWC-112 / SWC-124 /
+    SWC-127 detectors key on). The relayer pattern dups the calldata
+    word onto the stack and CALLs without any intervening `GAS` opcode,
+    so the symbolic stack-top at the CALL site is a calldata leaf
+    (verified on the fixture: `gas mentions_calldata = True` on the
+    vulnerable contract, `False` on the safe `call(data)` forwarder
+    that emits `GAS` immediately before CALL, and `False` on every
+    other call-emitting fixture in the suite — `hardcoded-gas-vuln`,
+    `hardcoded-gas-safe`, `ether-withdrawal-vuln`, `reentrancy_vuln`,
+    `unchecked-call-vuln`). POST_V01.md's Rotation 33 verification
+    deferred SWC-126 on the grounds that it "requires modelling the
+    relationship between the caller's forwarded gas fraction and the
+    sub-call's recipient-controllable revert" — that framing assumed
+    the returndata-bomb / 63-64-rule variant of SWC-126. The relayer
+    variant has a clean, model-robust symbolic signal that requires no
+    such modelling: the gas operand either traces to calldata or it
+    does not, and oracle's existing symbolic engine answers that
+    question directly. A per-detector flagged-pc set reports each
+    caller-gas call site at most once across paths.]
+    """
+
+    category = "insufficient_gas_griefing"
+
+    # All four call-family ops take a gas operand on top of stack. CALL /
+    # CALLCODE pop 7 items (gas, to, value, inoff, insize, outoff, outsize);
+    # STATICCALL / DELEGATECALL pop 6 (no value). The gas word is `stack[-1]`
+    # for every variant — the relayer-griefing surface applies to all four
+    # because all four let the outer transaction succeed while the inner
+    # call OOGs (the inner failure surfaces as a 0 retval, not a revert).
+    _OPS = ("CALL", "CALLCODE", "STATICCALL", "DELEGATECALL")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._OPS:
+            return
+        if instruction.pc in self._flagged_pcs:
+            return
+        if not state.stack:
+            return
+        gas_operand = state.stack[-1]
+        if _is_concrete(gas_operand):
+            # author-hardcoded gas (the SWC-134 surface, or any other compile-
+            # time constant) — not caller-controllable, not SWC-126.
+            return
+        if not _mentions_calldata(gas_operand, vm):
+            # `GAS` opcode (forwards all remaining gas) lowers to a fresh
+            # `gas_<pc>` symbol with no calldata in its AST — the safe
+            # pattern is silently filtered here.
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
 class SignatureMalleabilityDetector(DetectorHook):
     """Detects missing signature-malleability protection (SWC-117, "Signature
     Malleability").
@@ -2241,4 +2355,5 @@ DETECTOR_REGISTRY = {
     "signature-replay": SignatureReplayDetector,
     "signature-malleability": SignatureMalleabilityDetector,
     "hardcoded-gas": HardcodedGasCallDetector,
+    "insufficient-gas-griefing": InsufficientGasGriefingDetector,
 }
