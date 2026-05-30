@@ -50,6 +50,7 @@ _TITLE = {
     "prevrandao_randomness": "Weak Randomness from block.prevrandao (SWC-120)",
     "write_arbitrary_storage": "Write to Arbitrary Storage Location (SWC-124)",
     "signature_replay": "Missing Chain Bind for Signature (SWC-121)",
+    "signature_malleability": "Signature Malleability (SWC-117)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
