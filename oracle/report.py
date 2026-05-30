@@ -49,6 +49,7 @@ _TITLE = {
     "arbitrary_jump": "Arbitrary Jump with Function Type Variable (SWC-127)",
     "prevrandao_randomness": "Weak Randomness from block.prevrandao (SWC-120)",
     "write_arbitrary_storage": "Write to Arbitrary Storage Location (SWC-124)",
+    "signature_replay": "Missing Chain Bind for Signature (SWC-121)",
 }
 
 # Highest-to-lowest banding order used in the summary block.

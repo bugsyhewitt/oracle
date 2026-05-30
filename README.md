@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -714,6 +714,48 @@ alongside the broader `selfdestruct` (`reachable_selfdestruct`) detector. Safe
 designs never accept a storage *key* from untrusted input; if dynamic storage
 addressing is genuinely needed, gate it behind a strict caller-bound access
 check (`onlyOwner`) and a fixed allow-list of slot indices.
+
+### `signature-replay` — cross-chain signature replay (SWC-121)
+
+```bash
+oracle --contract tests/fixtures/signature-replay-vuln.sol \
+       --input-type sol --check signature-replay --max-depth 64 --format json
+```
+
+Flags a contract that uses `ecrecover(...)` to authenticate an action over a
+payload that does **not** include `block.chainid` (`category:
+"signature_replay"`, severity `high`). Without a chain-identifier in the
+signed hash a well-formed signature is valid bit-for-bit on every chain the
+contract is deployed on, so an attacker lifts a signature off one chain and
+replays it on another (Ethereum mainnet → a fork chain, L1 → L2 mirror, or
+any post-fork wallet → its pre-fork twin — the canonical post-DAO-fork drain
+class, SWC-121, "Missing Protection against Signature Replay Attacks"). EIP-
+155 + EIP-1344 introduced `CHAINID` (opcode `0x46`, Solidity's
+`block.chainid`) for exactly this remediation: include it in the signed
+payload and the signature only verifies on the chain that produced it.
+
+The discriminating signal is a **bytecode-level conjunction**: the contract
+reaches a `STATICCALL` (or `CALL`) whose concrete target address is `1` (the
+ECRECOVER precompile) **and** the contract's disassembly contains no
+`CHAINID` opcode anywhere. The absence of `CHAINID` is a hard impossibility
+proof: a contract with zero `CHAINID` opcodes in its bytecode demonstrably
+cannot incorporate the chain id into any signed payload. A `CHAINID`
+*anywhere* in the bytecode is enough to acquit (even if a specific path does
+not happen to read it, the contract has the *capacity* to bind chain
+context, e.g. a cached domain separator computed once at deploy time).
+`signature-replay-vuln.sol`'s `claim(...)` recovers a signer over
+`keccak256(abi.encodePacked(recipient, amount, nonce))` and is flagged.
+`signature-replay-safe.sol`'s `claim(...)` includes `block.chainid` in the
+hash and is clean — proving the detector keys on the **absence** of
+`CHAINID` alongside the `ecrecover`, not on the `ecrecover` call alone (the
+STATICCALL to address `1` is still in the safe bytecode).
+
+A `STATICCALL` / `CALL` to a concrete address other than `1` (the
+overwhelmingly common case of an external contract call), and a
+`STATICCALL` / `CALL` whose target is symbolic, are not flagged. A contract
+that never calls `ECRECOVER` produces no finding regardless of whether it
+reads `CHAINID`. Safe designs use EIP-712 with a chain-bound domain
+separator, or otherwise bind `block.chainid` into the signed payload.
 
 ### bytecode input (no solc)
 

@@ -53,6 +53,8 @@ CONTRACTS = {
     "arbitrary-jump-safe.sol": "ArbitraryJumpSafe",
     "prevrandao-randomness-vuln.sol": "PrevrandaoRandomnessVuln",
     "prevrandao-randomness-safe.sol": "PrevrandaoRandomnessSafe",
+    "signature-replay-vuln.sol": "SignatureReplayVuln",
+    "signature-replay-safe.sol": "SignatureReplaySafe",
 }
 
 
