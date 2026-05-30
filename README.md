@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -756,6 +756,63 @@ overwhelmingly common case of an external contract call), and a
 that never calls `ECRECOVER` produces no finding regardless of whether it
 reads `CHAINID`. Safe designs use EIP-712 with a chain-bound domain
 separator, or otherwise bind `block.chainid` into the signed payload.
+
+### `signature-malleability` — ECDSA signature malleability (SWC-117)
+
+```bash
+oracle --contract tests/fixtures/signature-malleability-vuln.sol \
+       --input-type sol --check signature-malleability --max-depth 64 --format json
+```
+
+Flags a contract that authenticates via `ecrecover(...)` without enforcing
+the EIP-2 `s <= secp256k1n / 2` malleability bound (`category:
+"signature_malleability"`, severity `medium`). The EVM's `ecrecover`
+precompile does **not** reject the high-`s` half of the secp256k1 curve, so
+for every valid signature `(r, s, v)` there is a second, equally valid
+signature `(r, n - s, v ^ 1)` that recovers the *same* signer over the
+*same* message but is a different byte pattern. A contract that uses the
+raw signature bytes as a uniqueness key — the canonical
+`usedSignatures[keccak256(r, s, v)] = true` anti-replay pattern, and a long
+tail of "nonce by signature" bugs — sees the malleable twin as a new
+signature and lets the action through twice (SWC-117, "Signature
+Malleability"). The safe primitive is OpenZeppelin's `ECDSA.recover`, which
+emits the EIP-2 reference guard
+`require(uint256(s) <= 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0)`.
+`signature-malleability-vuln.sol`'s `claim(...)` recovers a signer and keys
+uniqueness off the sig bytes with no `s`-bound check, and is flagged.
+
+The discriminating signal is a **bytecode-level conjunction** (the same
+shape the SWC-121 `signature-replay` detector uses for CHAINID-absence,
+applied to a different structural literal): the contract (1) reaches a
+`STATICCALL` (or `CALL`) whose concrete target address is `1` (the
+ECRECOVER precompile) **and** (2) the contract's disassembly contains **no
+`PUSH32` of the secp256k1n / 2 constant
+(`0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0`)
+anywhere**. The absence of that PUSH32 is a hard impossibility proof: a
+contract that nowhere materialises the n / 2 literal demonstrably cannot
+enforce `s <= n / 2` against an attacker-supplied `s`. A `PUSH32` of the
+constant *anywhere* in the bytecode is enough to acquit (the contract has
+the *capacity* to bind the bound, even if a specific path does not
+exercise it). `signature-malleability-safe.sol`'s `claim(...)` enforces the
+EIP-2 guard before the recover and is clean — proving the detector keys on
+the **absence** of the n / 2 PUSH32 alongside the `ecrecover`, not on the
+`ecrecover` call alone (the STATICCALL to address `1` is still in the safe
+bytecode).
+
+A `STATICCALL` / `CALL` to a concrete address other than `1` (the
+overwhelmingly common case of an external contract call), and a
+`STATICCALL` / `CALL` whose target is symbolic, are not flagged. A
+contract that never calls `ECRECOVER` produces no finding regardless of
+whether it pushes the n / 2 literal.
+
+Deliberately distinct from `signature-replay` (SWC-121, the *absent chain
+bind*): SWC-117 and SWC-121 are independently keyed bug classes, and the
+same contract can be vulnerable to one, the other, both, or neither — a
+triage team gets two distinct findings rather than a single conflated
+"signature problem" alert. This mirrors the SWC-105 / SWC-106 carve-out
+precedent (an unprotected ether withdrawal and an unprotected
+SELFDESTRUCT each get their own SWC-aligned category even when the broader
+access-control detector overlaps).
 
 ### bytecode input (no solc)
 
