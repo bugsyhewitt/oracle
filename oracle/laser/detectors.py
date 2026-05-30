@@ -45,6 +45,7 @@ SEVERITY = {
     "write_arbitrary_storage": "high",
     "signature_replay": "high",
     "signature_malleability": "medium",
+    "hardcoded_gas_call": "medium",
 }
 
 
@@ -1699,6 +1700,193 @@ _SECP256K1_HALF_N = (
 )
 
 
+# The EIP-150 / `transfer` / `send` gas stipend, 2300, materialised as a
+# `PUSH2 0x08FC` immediate by solc immediately before the call's setup
+# arithmetic. Solidity emits the literal verbatim: `transfer` lowers to
+# `call(2300, to, value, 0, 0, 0, 0)` and `send` lowers to a sibling form,
+# both with the 2300 as a PUSH2 literal rather than as a runtime `GAS`
+# opcode. Detecting the literal next to the call is the SWC-134 signature.
+_TRANSFER_GAS_STIPEND = 0x08FC  # 2300 decimal
+
+
+# How far back from a CALL site we look for the hardcoded-2300 PUSH2. solc's
+# `transfer` lowering interleaves a few stack/memory ops between the literal
+# and the CALL (a SUB for the value/balance check, the memory-region setup,
+# the DUPs that hoist the gas literal to the top of stack at CALL time);
+# 24 instructions amply covers every solc 0.4-0.8 lowering I have seen
+# without straying into an unrelated earlier function. The window matters
+# because the literal is NOT the immediate predecessor: it is pushed early
+# and then DUPed into position. The window IS NOT permitted to also
+# contain a `GAS` opcode — if `GAS` shows up the gas operand is "forward
+# all remaining gas", which is the safe pattern and not SWC-134.
+_HARDCODED_GAS_WINDOW = 24
+
+
+class HardcodedGasCallDetector(DetectorHook):
+    """Detects a message call with a hardcoded gas amount (SWC-134, "Message
+    call with hardcoded gas amount").
+
+    Solidity's `address.transfer(x)` and `address.send(x)` lower to a
+    low-level `CALL` whose gas operand is the fixed 2300-gas EIP-150
+    stipend — emitted by solc as a `PUSH2 0x08FC` immediate immediately
+    before the call's setup arithmetic. Originally the 2300 stipend was
+    sized to cover a "log + nothing else" recipient fallback; post-Istanbul
+    (EIP-1884, Dec 2019) the gas cost of several common opcodes (SLOAD,
+    BALANCE, EXTCODEHASH) increased, and 2300 gas is no longer guaranteed
+    to be enough for *any* non-trivial recipient fallback to complete. A
+    contract that uses `transfer` to pay an arbitrary recipient — a proxy,
+    a multisig, an account-abstraction wallet, a Gnosis Safe — can revert
+    on perfectly innocent destinations, permanently bricking the pay
+    function for any address the original author did not anticipate.
+
+    The canonical fix is `(bool ok,) = to.call{value: x}(""); require(ok)`,
+    which forwards all remaining gas. This is the form documented by
+    OpenZeppelin's `Address.sendValue`, by Consensys Diligence, by
+    Solidity's own docs (since 0.6.0), and by the OWASP Smart Contract Top
+    10. SWC-134 is the named entry in the SWC registry.
+
+    Detection signal — a bytecode-level structural conjunction (mirrors the
+    SWC-117 / SWC-121 detectors' structural-impossibility approach,
+    inverted: here the bytecode CONTAINS the bug-witnessing literal rather
+    than ABSENT the fix-witnessing literal):
+
+      1. A `CALL` or `CALLCODE` instruction is REACHED on some path (the
+         standard inspect-hook signal — DELEGATECALL and STATICCALL cannot
+         forward value, so the `transfer`/`send` form does not apply to
+         them and they are intentionally out of scope).
+
+      2. AND in the disassembly's preceding window (the last 24
+         instructions before the CALL) there is a `PUSH2 0x08FC` immediate
+         — the EIP-150 2300-gas stipend literal — AND no `GAS` opcode
+         appears anywhere in that same window.
+
+    The `GAS`-absence half of the conjunction is what discriminates the
+    SWC-134 pattern from the safe `address.call{value: x}("")` pattern.
+    The safe form emits a `GAS` opcode immediately before the CALL
+    (forwarding all remaining gas) and emits no `PUSH2 0x08FC` at all;
+    the unsafe `transfer` form emits the `PUSH2 0x08FC` and emits no
+    `GAS` in the window. A `PUSH2 0x08FC` that happens to appear in
+    bytecode for an unrelated reason (e.g. the literal `2300` used as a
+    constant elsewhere in the program) is harmless: the per-call-site
+    window scopes the match to the few instructions immediately preceding
+    each CALL, so an unrelated 2300 literal somewhere else in the bytecode
+    does not false-positive a normal call.
+
+    The disassembly is scanned once and cached on the `vm` instance (the
+    bytecode does not change across paths), and a per-detector flagged-pc
+    set reports each hardcoded-gas call site at most once across the run.
+    No engine refactor, no new dependency.
+
+    This is deliberately distinct from the neighbouring call-aware
+    detectors. The EtherLeak detector (`unconstrained_ether_transfer`)
+    keys on the CALL's *recipient* being attacker-controlled; the
+    Unprotected Ether Withdrawal detector (SWC-105) keys on a *missing
+    caller guard* in front of a value-forwarding call; the Unchecked Call
+    Return detector (SWC-104) keys on the call's *return word being
+    discarded*; the DoS-with-failed-call detector (SWC-113) keys on the
+    call being *loop-bound*. SWC-134 is the **hardcoded gas amount**
+    surface — a structural property of the *gas operand*, orthogonal to
+    every other call-related check. A `transfer`-using fixture can simul-
+    taneously be perfectly access-controlled, called once not in a loop,
+    pay only `msg.sender`, and have its return value irrelevant (revert
+    on failure) — yet still be SWC-134 vulnerable on a recipient with a
+    non-trivial fallback.
+
+    [Worker decision: the discriminator is a static disassembly window
+    rather than a runtime-stack inspection of the gas operand because
+    oracle's bounded symbolic execution does not reliably preserve the
+    `2300` literal at the CALL site. solc's `transfer` lowering actually
+    materialises the gas as `2300 * iszero(iszero(value))` so that a zero
+    `value` call still completes — that arithmetic flows through MUL /
+    ISZERO and z3 may or may not simplify it back to the integer 2300 at
+    the inspect moment, depending on the symbolic shape of `value` on each
+    path. The static window approach is independent of the symbolic shape:
+    if the bytecode emits `PUSH2 0x08FC` next to a CALL with no `GAS`
+    intervening, the contract is using a hardcoded 2300-gas stipend — a
+    structural, model-robust signal that mirrors the proven approach
+    SWC-117 / SWC-121 use for their own structural-impossibility checks.
+    POST_V01.md had previously deferred SWC-131 (a sibling "restrictive
+    gas" item) as "fragile (the 2300-gas literal rarely survives as a
+    concrete operand in oracle's coarse model)" — the static-window read
+    is exactly the model-independent reframing that lifts that deferral
+    for the named SWC-134 surface.]
+    """
+
+    category = "hardcoded_gas_call"
+
+    # Solidity emits `transfer` / `send` as a CALL (legacy `callcode` form
+    # is also covered). DELEGATECALL / STATICCALL cannot forward value, so
+    # the `transfer`/`send` source form does not lower to them — they are
+    # intentionally out of scope.
+    _OPS = ("CALL", "CALLCODE")
+
+    def __init__(self):
+        super().__init__()
+        self._flagged_pcs = set()
+
+    def inspect(self, vm, state, instruction) -> None:
+        if instruction.mnemonic not in self._OPS:
+            return
+        if instruction.pc in self._flagged_pcs:
+            return
+        if not _call_has_hardcoded_gas(vm, instruction.pc):
+            return
+        self._flagged_pcs.add(instruction.pc)
+        self.findings.append(_finding(self.category, state, instruction, vm))
+
+
+def _call_has_hardcoded_gas(vm, call_pc: int) -> bool:
+    """True if the CALL/CALLCODE at `call_pc` is preceded (within
+    `_HARDCODED_GAS_WINDOW` instructions) by a `PUSH2 0x08FC` immediate
+    AND no intervening `GAS` opcode — the structural signature of solc's
+    `transfer`/`send` hardcoded-2300-gas-stipend lowering (SWC-134).
+
+    Result is cached on the vm in a dict keyed by call pc. The bytecode
+    does not change across paths so the per-pc decision amortises to O(1)
+    across the run.
+    """
+    cache = getattr(vm, "_hardcoded_gas_cache", None)
+    if cache is None:
+        cache = {}
+        vm._hardcoded_gas_cache = cache
+    if call_pc in cache:
+        return cache[call_pc]
+
+    insts = vm.disasm.instructions
+    # locate the call's index in the instruction list. `vm.disasm.by_pc` is
+    # the pc->instruction map; we need the *index* into `insts` so we can
+    # walk backwards over the preceding window. The instruction list is in
+    # pc order, so a linear scan would also work but the by_pc dict makes
+    # the lookup O(1) per call site.
+    call_inst = vm.disasm.by_pc.get(call_pc)
+    if call_inst is None:
+        cache[call_pc] = False
+        return False
+    # find the index — instructions are ordered but pc gaps may exist after
+    # PUSH-immediates, so we can't compute the index from pc directly.
+    try:
+        idx = insts.index(call_inst)
+    except ValueError:  # defensive — should not happen
+        cache[call_pc] = False
+        return False
+
+    has_stipend = False
+    window_start = max(0, idx - _HARDCODED_GAS_WINDOW)
+    for j in range(window_start, idx):
+        inst = insts[j]
+        if inst.mnemonic == "GAS":
+            # the call is forwarding runtime gas — the safe pattern.
+            cache[call_pc] = False
+            return False
+        if (
+            inst.mnemonic == "PUSH2"
+            and inst.operand == _TRANSFER_GAS_STIPEND
+        ):
+            has_stipend = True
+    cache[call_pc] = has_stipend
+    return has_stipend
+
+
 class SignatureMalleabilityDetector(DetectorHook):
     """Detects missing signature-malleability protection (SWC-117, "Signature
     Malleability").
@@ -2052,4 +2240,5 @@ DETECTOR_REGISTRY = {
     "write-arbitrary-storage": WriteArbitraryStorageDetector,
     "signature-replay": SignatureReplayDetector,
     "signature-malleability": SignatureMalleabilityDetector,
+    "hardcoded-gas": HardcodedGasCallDetector,
 }

@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -803,6 +803,50 @@ Deliberately distinct from `signature-replay` (SWC-121, missing `CHAINID`):
 the two detectors fire on the same call sink for orthogonal bugs with
 orthogonal remediations — a contract can bind to the chain but still accept
 malleable signatures, and vice versa.
+
+### `hardcoded-gas` — message call with hardcoded gas amount (SWC-134)
+
+```bash
+oracle --contract tests/fixtures/hardcoded-gas-vuln.sol \
+       --input-type sol --check hardcoded-gas --max-depth 64 --format json
+```
+
+Flags a `CALL` / `CALLCODE` whose gas operand is the fixed 2300-gas EIP-150
+stipend — the lowering Solidity emits for `address.transfer(x)` and
+`address.send(x)` (`category: "hardcoded_gas_call"`, severity `medium`).
+Originally the 2300 stipend was sized to cover a "log + nothing else"
+recipient fallback; post-Istanbul (EIP-1884, Dec 2019) the gas cost of
+several common opcodes (`SLOAD`, `BALANCE`, `EXTCODEHASH`) increased, and
+2300 gas is no longer guaranteed to be enough for any non-trivial recipient
+fallback to complete. A contract that uses `transfer` to pay an arbitrary
+recipient — a proxy, a multisig, an account-abstraction wallet, a Gnosis
+Safe — can revert on perfectly innocent destinations, permanently bricking
+the pay function for any address the original author did not anticipate
+(SWC-134, "Message call with hardcoded gas amount"). The canonical fix,
+documented by OpenZeppelin's `Address.sendValue` and by Solidity's own docs
+since 0.6.0, is `(bool ok,) = to.call{value: x}(""); require(ok)`, which
+forwards all remaining gas.
+
+The discriminating signal is a **bytecode-level structural conjunction**
+(mirroring `signature-malleability` and `signature-replay`'s structural
+approach): a `CALL`/`CALLCODE` is reached, **and** the preceding
+24-instruction window in the disassembly contains a `PUSH2 0x08FC` (the
+2300-gas literal) **and** no `GAS` opcode. The `GAS`-absence half
+discriminates the SWC-134 pattern from the safe `address.call{value: x}("")`
+lowering, which emits a `GAS` opcode immediately before the CALL and emits
+no `PUSH2 0x08FC` at all. `hardcoded-gas-vuln.sol`'s `pay()` uses
+`to.transfer(msg.value)` and is flagged. `hardcoded-gas-safe.sol`'s `pay()`
+uses `to.call{value: msg.value}("")` — the `CALL` opcode is still present
+in the bytecode, proving the detector keys on the literal-2300 gas signature
+next to the call, not on the `CALL` opcode itself.
+
+`DELEGATECALL` / `STATICCALL` are intentionally out of scope: they cannot
+forward value, so the `transfer` / `send` source form does not lower to
+them. Deliberately distinct from `ether-leak` (attacker-controlled
+recipient), `ether-withdrawal` (SWC-105, missing caller guard),
+`unchecked-call` (SWC-104, discarded return word), and `dos-failed-call`
+(SWC-113, loop-bound call): SWC-134 is a structural property of the gas
+operand, orthogonal to every other call-related check.
 
 ### bytecode input (no solc)
 

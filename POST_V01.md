@@ -1453,6 +1453,115 @@ refactor, no new dependency.
 
 ---
 
+### 28. Hardcoded-gas message-call detector (SWC-134) ✅ IMPLEMENTED (Phase 2, Rotation 33)
+
+**Status:** Shipped. Added `HardcodedGasCallDetector` (category
+`hardcoded_gas_call`, severity `medium`, CLI token `hardcoded-gas`) — the next
+new *bug class* of Phase 2. It flags a `CALL` / `CALLCODE` whose gas operand
+is the fixed 2300-gas EIP-150 stipend Solidity emits for `address.transfer(x)`
+and `address.send(x)` — SWC-134, "Message call with hardcoded gas amount."
+Originally the 2300 stipend was sized to cover a "log + nothing else"
+recipient fallback; post-Istanbul (EIP-1884, Dec 2019) the gas cost of several
+common opcodes (SLOAD, BALANCE, EXTCODEHASH) increased and 2300 gas is no
+longer guaranteed to be enough for any non-trivial recipient fallback. A
+contract that uses `transfer` to pay an arbitrary recipient — a proxy, a
+multisig, an account-abstraction wallet, a Gnosis Safe — can revert on
+perfectly innocent destinations, permanently bricking the pay function for
+any address the original author did not anticipate. The canonical fix is
+`(bool ok,) = to.call{value: x}(""); require(ok)` (OpenZeppelin's
+`Address.sendValue`, Solidity's own docs since 0.6.0), which forwards all
+remaining gas.
+
+The discriminating signal is a bytecode-level structural conjunction
+(mirrors the SWC-117 / SWC-121 detectors' structural approach, inverted —
+the bytecode CONTAINS the bug-witnessing literal rather than ABSENT the
+fix-witnessing literal): a `CALL` / `CALLCODE` is reached on some path, AND
+the preceding 24-instruction window in the disassembly contains a
+`PUSH2 0x08FC` (the 2300-gas literal) AND no `GAS` opcode. The `GAS`-absence
+half discriminates the SWC-134 pattern from the safe `call{value: x}("")`
+lowering, which emits a `GAS` opcode immediately before the CALL (forwarding
+all remaining gas) and emits no `PUSH2 0x08FC` at all. The window is scoped
+to the few instructions immediately preceding each CALL so an unrelated 2300
+literal elsewhere in the bytecode does not false-positive a normal call. The
+per-call-site decision is cached on the `vm` (the bytecode does not change
+across paths) and a per-detector flagged-pc set reports each hardcoded-gas
+call site once across paths. No engine refactor, no new dependency.
+
+DELEGATECALL / STATICCALL are intentionally out of scope: they cannot
+forward value, so the `transfer` / `send` source form does not lower to
+them. This is deliberately distinct from the neighbouring call-aware
+detectors: EtherLeak (attacker-controlled *recipient*), SWC-105 unprotected-
+ether-withdrawal (*missing caller guard*), SWC-104 unchecked-call (*discarded
+return word*), SWC-113 dos-failed-call (*loop-bound call*). SWC-134 is the
+**hardcoded gas amount** surface — a structural property of the gas operand,
+orthogonal to every other call-related check. A `transfer`-using fixture can
+simultaneously be perfectly access-controlled, called once not in a loop,
+pay only `msg.sender`, and have its return word irrelevant (revert on
+failure) — yet still be SWC-134 vulnerable on a recipient with a non-trivial
+fallback.
+
+The report `_TITLE` map gains `Message call with hardcoded gas amount
+(SWC-134)` so h1md headings and SARIF rule descriptions render; medium
+severity is already handled by the SARIF level / security-severity maps.
+Tests: `tests/test_hardcoded_gas_call.py` (24 default + 2 slow real-Z3)
+cover the constant pin (`_TRANSFER_GAS_STIPEND == 0x08FC == 2300`),
+window-size bounds, registry/CLI registration, severity, report-title
+mapping, fixture opcode + literal presence (vuln has PUSH2 0x08FC + CALL,
+no GAS; safe has CALL + GAS, no PUSH2 0x08FC), the `_call_has_hardcoded_gas`
+helper + per-call-pc caching on the vm + defensive unknown-pc handling,
+vulnerable-flagged / safe-clean at both the detector and end-to-end
+layers, the per-call-site dedupe, three false-positive guards (an ordinary
+`call{value:}` fixture, a delegatecall fixture, a no-call fixture), two
+cross-detector separation tests (the SWC-104 unchecked-call and reentrancy
+fixtures do not trip SWC-134), participation in an `all`-checks run, and
+h1md + SARIF rendering. Two new fixtures: `hardcoded-gas-vuln.sol` (`pay()`
+uses `to.transfer(msg.value)`) and `hardcoded-gas-safe.sol` (`pay()` uses
+`to.call{value: msg.value}("")` with `require(ok)` — CALL still present, so
+the test proves the detector keys on the literal-2300 gas signature next to
+the call, not on the CALL opcode itself).
+
+**Why it matters:** Message call with a hardcoded gas amount is a named
+SWC entry (SWC-134), on every audit checklist, and the root cause of a
+long tail of post-Istanbul brick-the-payout incidents (the `transfer`-to-
+a-Gnosis-Safe / `transfer`-to-a-proxy class). It was a visible gap in
+oracle's detector set — twenty-five detectors, none covering the gas-operand
+surface — and the most-cited example of an "availability bug a bytecode
+tool should catch but no current oracle detector does." It maps cleanly
+onto oracle's existing architecture — the same static-disassembly-conjunction
+machinery the SWC-117 (signature-malleability) and SWC-121 (signature-
+replay) detectors use, applied to a different pair of bytecode signals
+(presence of a literal next to a CALL + absence of GAS in that window) —
+so it adds a named bug class with no engine refactor and no new dependency.
+
+**Verification of prior state (per roster instruction):** the roster called
+for assessing one of SWC-134 (hardcoded gas), SWC-126 (insufficient gas
+griefing), or SWC-128 (block gas-limit DoS). SWC-128 is **already shipped**
+— `BlockGasLimitDosDetector` shipped in Rotation 19 — a repo grep
+confirmed the detector, registry entry, fixtures, and report title all
+predate this rotation. SWC-126 (insufficient gas griefing) has no clean
+bytecode signal in oracle's coarse memory model — it requires modelling
+the relationship between the caller's forwarded gas fraction and the
+sub-call's recipient-controllable revert, a data-flow that oracle's
+bounded-symbolic engine does not track precisely; earlier rotations
+rejected sibling source-AST-linter concerns (SWC-111, SWC-119, SWC-125,
+SWC-126, SWC-129, SWC-130, SWC-133, SWC-135, SWC-136) on the same basis.
+SWC-134 was selected because (a) it admits a clean, model-robust static
+signal — the bytecode literal `PUSH2 0x08FC` is the exact discriminator
+solc emits for `transfer`/`send` and is preserved verbatim across every
+solc 0.4-0.8 version inspected — and (b) the static-disassembly-conjunction
+approach is independent of the symbolic shape of the gas operand at the
+CALL site, which is exactly the model-fragility concern that previously
+deferred SWC-131 (the sibling "restrictive gas" item). The same
+self-contained-detector play that shipped Rotations 13-30. This is the
+assessed "#23+" gap the roster called for.
+
+**Estimated effort:** Low. One detector class keying on a static-disassembly
+conjunction at each CALL site (a back-window scan for `PUSH2 0x08FC` + no
+`GAS`), a per-vm cache, a report title, two fixtures. No engine refactor,
+no new dependency.
+
+---
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on
