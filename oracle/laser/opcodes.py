@@ -64,6 +64,9 @@ OPCODES = {
     0x45: ("GASLIMIT", 0),
     0x46: ("CHAINID", 0),
     0x47: ("SELFBALANCE", 0),
+    0x48: ("BASEFEE", 0),      # EIP-3198 (London): current block base fee
+    0x49: ("BLOBHASH", 0),     # EIP-4844 (Dencun): versioned hash of blob at index
+    0x4A: ("BLOBBASEFEE", 0),  # EIP-7516 (Dencun): current block blob base fee
     0x50: ("POP", 0),
     0x51: ("MLOAD", 0),
     0x52: ("MSTORE", 0),
@@ -76,9 +79,13 @@ OPCODES = {
     0x59: ("MSIZE", 0),
     0x5A: ("GAS", 0),
     0x5B: ("JUMPDEST", 0),
+    0x5C: ("TLOAD", 0),        # EIP-1153 (Cancun): transient storage load
+    0x5D: ("TSTORE", 0),       # EIP-1153 (Cancun): transient storage store
+    0x5E: ("MCOPY", 0),        # EIP-5656 (Cancun): memory copy
     0x5F: ("PUSH0", 0),
     0xF0: ("CREATE", 0),
     0xF1: ("CALL", 0),
+    0xF5: ("CREATE2", 0),      # EIP-1014 (Constantinople): create at deterministic address
     0xF2: ("CALLCODE", 0),
     0xF3: ("RETURN", 0),
     0xF4: ("DELEGATECALL", 0),

@@ -1672,6 +1672,105 @@ fixtures. No engine refactor, no new dependency.
 
 ---
 
+### 30. Cross-function reentrancy detector (SWC-107 variant) ✅ IMPLEMENTED (Phase 2, Rotation 35)
+
+**Status:** Shipped. Added `CrossFunctionReentrancyDetector` (category
+`reentrancy_cross_function`, severity `high`, CLI token
+`reentrancy-cross-function`) — the cross-function variant of SWC-107,
+distinct from the existing single-function CEI-violation detector.
+The cross-function variant fires when a `CALL`/`DELEGATECALL`/`CALLCODE`
+that forwards ether (symbolic or concrete value) is followed in the same
+path by an `SSTORE` to a slot that was previously `SLOAD`ed — with the
+SSTORE occurring in a path segment that arrives via a different function
+selector than the CALL. This catches the canonical DAO-class fund-drain
+where `withdraw()` calls out before updating `balances[msg.sender]`, and
+the caller re-enters via a *different* function (e.g. `transfer()`) that
+writes the same slot — a pattern that the original CEI detector, which
+keys on a CALL-then-SSTORE sequence within the same path, cannot
+distinguish from legitimate patterns. The detector tracks the entry
+selector on the path and flags only when the SSTORE's path was entered
+with a different selector than the CALL's path — a per-detector
+flagged-pc set deduplicates across paths.
+
+**Why it matters:** Cross-function reentrancy is the SWC-107 surface that
+single-function CEI-violation detectors miss. It was the root cause of the
+original TheDAO hack variant where `split()` re-entered via `makeProposal()`
+rather than the same function, and it appears in audit checklists as a
+distinct item from the classic CEI reentrancy. Adding it completes oracle's
+SWC-107 coverage for both the same-function and cross-function attack shapes.
+
+**Verification of prior state:** roster called for SWC-107 reentrancy variants
+or SWC-131 (unused variables). SWC-131 remains infeasible (source-AST-linter
+concern, no bytecode signal). SWC-107 cross-function variant was previously
+deferred as "requires cross-function / cross-transaction state modelling" but
+the selector-tracking approach — using the entry point's CALLDATALOAD[0:4]
+signature stamped on the path at function entry — provides the necessary
+cross-function context within oracle's single-transaction bounded model, using
+the same stack-provenance machinery already proven by five other detectors.
+
+**Estimated effort:** Medium. Selector tracking on path entry, CALL-then-
+SSTORE cross-selector detection, a per-detector flagged-pc set, a report
+title, two fixtures. No engine refactor.
+
+---
+
+### 31. Cancun / Dencun / London opcode coverage ✅ IMPLEMENTED (Phase 2, Rotation 36)
+
+**Status:** Shipped. Added conservative-sound handlers in `vm.py` and opcode
+table entries in `opcodes.py` for seven opcodes present in post-London /
+post-Cancun EVM bytecode that previously caused oracle to halt every path that
+encountered them:
+
+| Opcode | EIP | Hardfork | Stack effect | Handler |
+|--------|-----|----------|-------------|---------|
+| `BASEFEE` (0x48) | EIP-3198 | London | push fresh symbol | `_op_basefee` |
+| `BLOBHASH` (0x49) | EIP-4844 | Dencun | pop index, push fresh symbol | `_op_blobhash` |
+| `BLOBBASEFEE` (0x4a) | EIP-7516 | Dencun | push fresh symbol | `_op_blobbasefee` |
+| `TLOAD` (0x5c) | EIP-1153 | Cancun | pop key, push fresh symbol | `_op_tload` |
+| `TSTORE` (0x5d) | EIP-1153 | Cancun | pop key + value, no push | `_op_tstore` |
+| `MCOPY` (0x5e) | EIP-5656 | Cancun | pop dest/src/size, no push | `_op_mcopy` |
+| `CREATE2` (0xf5) | EIP-1014 | Constantinople | pop value/offset/size/salt, push fresh address symbol | `_op_create2` |
+
+All handlers follow the proven conservative-sound convention (fresh symbolic
+words for loads; no-ops for stores and copies against the coarse memory model),
+ensuring paths survive these opcodes rather than halting. `TSTORE` is
+explicitly modelled as a no-op on oracle's persistent world state — transient
+storage resets every transaction, so no `fork_world()` is needed. `TLOAD`
+returns a fresh per-pc symbolic word mirroring `SLOAD`'s treatment. `CREATE2`
+pops four operands (value, offset, size, salt) and pushes a fresh per-pc
+symbolic address word, mirroring the existing `CREATE` no-op convention.
+
+Tests: `tests/test_opcodes_cancun.py` (10 tests) covering path survival,
+correct stack-effect (depth before/after), per-pc symbol freshness for TLOAD
+and CREATE2, and a `TSTORE`-does-not-bleed-into-`SLOAD` guard proving the
+transient/persistent storage boundary is correct.
+
+**Why it matters:** Solidity ≥0.8.24 emits `MCOPY` for internal memory copies
+(replacing the `MLOAD/MSTORE` sequence), `TLOAD`/`TSTORE` for transient-
+storage patterns (ERC-1153), and `BASEFEE` for EIP-1559 gas-price guards.
+Any contract compiled with `--evm-version cancun` or later will emit one or
+more of these opcodes; before this patch, oracle halted every such path,
+producing zero findings on post-Cancun bytecode. The conservative-sound
+approach (fresh symbolic words for unknown values, no-ops for writes) maintains
+oracle's unsoundness guarantee — it may produce false negatives if a finding
+depends on the exact value of a TLOAD result, but it never produces false
+positives and never loses coverage on paths that do not branch on these values.
+
+**Verification of prior state (per roster instruction):** roster called for
+assessing SWC-107 reentrancy-variant or SWC-131 unused-variable as the next
+detector. SWC-107 cross-function variant shipped in Rotation 35. SWC-131
+remains infeasible (source-AST concern, no bytecode signal). With both
+assessed SWC candidates shipped or infeasible, the highest-value unblocked
+work is the opcode-coverage gap: a grep of `opcodes.py` confirmed that seven
+opcodes present in widely-deployed post-London/Cancun contracts caused
+oracle to halt paths, while all existing detectors continued to pass the full
+test suite with the seven new handlers added. This is the same opcode-coverage
+play as Rotation 2's Item #1 (RETURNDATASIZE/RETURNDATACOPY/EXTCODESIZE family),
+now applied to the Cancun/Dencun hardfork surface.
+
+**Estimated effort:** Low. Seven handler methods + table entries, one new test
+file. No engine refactor, no new dependency.
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

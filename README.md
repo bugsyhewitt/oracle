@@ -974,6 +974,24 @@ path survives through a guard built on them: `TIMESTAMP` / `NUMBER` feed the
 in a branch constraint, so a contract that branches on `blockhash(n)` or
 `tx.gasprice` no longer halts the path at the opcode.
 
+**Cancun / Dencun / London opcode coverage:** oracle handles the post-London
+and post-Cancun opcodes that Solidity ≥0.8.24 and ERC-1153 contracts emit:
+
+| Opcode | EIP | Hardfork | Stack effect |
+|--------|-----|----------|-------------|
+| `BASEFEE` (0x48) | EIP-3198 | London | push symbolic `basefee` word |
+| `BLOBHASH` (0x49) | EIP-4844 | Dencun | pop index, push symbolic `blobhash_<pc>` |
+| `BLOBBASEFEE` (0x4a) | EIP-7516 | Dencun | push symbolic `blobbasefee` word |
+| `TLOAD` (0x5c) | EIP-1153 | Cancun | pop key, push symbolic `tload_<pc>` (transient-storage read) |
+| `TSTORE` (0x5d) | EIP-1153 | Cancun | pop key + value; no-op on persistent state (transient storage resets each tx) |
+| `MCOPY` (0x5e) | EIP-5656 | Cancun | pop dest/src/size; no-op on coarse memory model |
+| `CREATE2` (0xf5) | EIP-1014 | Constantinople | pop value/offset/size/salt, push symbolic `create2_addr_<pc>` |
+
+All handlers are conservative-sound: a path survives through these opcodes
+without incorrect constraints. Without them, any path that encountered a
+post-Cancun opcode halted immediately, producing no findings for the rest of
+that execution trace.
+
 ---
 
 ## Multi-transaction (stateful) exploration

@@ -642,6 +642,73 @@ class SymbolicVM:
     _op_chainid = lambda self, s, i: self._generic_env(s, i, "chainid")
     _op_msize = lambda self, s, i: self._generic_env(s, i, "msize")
 
+    def _op_basefee(self, state, inst):
+        # BASEFEE (EIP-3198, London): current block base fee in wei. Unknown
+        # statically; a fresh symbolic word keeps the path alive without
+        # constraining the solver to a concrete fee.
+        state.push(symbol_factory.BitVecSym(self._sym("basefee"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_blobhash(self, state, inst):
+        # BLOBHASH (EIP-4844, Dencun): versioned hash of the blob at the given
+        # index in the transaction's blob list. Unknown statically; a fresh
+        # per-pc symbolic word keeps the path alive. Pops the index operand.
+        state.pop()  # index
+        state.push(symbol_factory.BitVecSym(self._sym(f"blobhash_{inst.pc}"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_blobbasefee(self, state, inst):
+        # BLOBBASEFEE (EIP-7516, Dencun): current block blob base fee. Unknown
+        # statically; a fresh symbolic word keeps the path alive.
+        state.push(symbol_factory.BitVecSym(self._sym("blobbasefee"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_tload(self, state, inst):
+        # TLOAD (EIP-1153, Cancun): load a value from transient storage (resets
+        # each transaction). Oracle does not model transient storage state across
+        # instructions, so this is treated conservatively: pop the key, push a
+        # fresh symbolic word. This is sound — the path continues instead of
+        # halting — and no more precise than oracle's coarse SLOAD model.
+        state.pop()  # key
+        state.push(symbol_factory.BitVecSym(self._sym(f"tload_{inst.pc}"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_tstore(self, state, inst):
+        # TSTORE (EIP-1153, Cancun): store a value in transient storage. Transient
+        # storage resets at the end of every transaction, so oracle's persistent
+        # world state is unchanged. Pop key + value and continue.
+        state.pop()  # key
+        state.pop()  # value
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_mcopy(self, state, inst):
+        # MCOPY (EIP-5656, Cancun): copy a region of memory. Oracle models memory
+        # coarsely (MLOAD always returns a fresh symbol), so this is a sound no-op
+        # that keeps the path alive without any incorrect constraint.
+        state.pop()  # destOffset
+        state.pop()  # srcOffset
+        state.pop()  # size
+        state.pc = inst.pc + 1
+        return [state]
+
+    def _op_create2(self, state, inst):
+        # CREATE2 (EIP-1014, Constantinople): deploy a contract at a
+        # deterministic address derived from the deployer, salt, and init-code
+        # hash. Oracle does not model deployed sub-contracts; treat the same as
+        # CREATE — pop four operands, push a fresh symbolic address word.
+        state.pop()  # value
+        state.pop()  # offset
+        state.pop()  # size
+        state.pop()  # salt
+        state.push(symbol_factory.BitVecSym(self._sym(f"create2_addr_{inst.pc}"), 256))
+        state.pc = inst.pc + 1
+        return [state]
+
     def _op_difficulty(self, state, inst):
         # DIFFICULTY (0x44) pushes `block.prevrandao` (post-Merge) or
         # `block.difficulty` (pre-Merge). Record the read so the
