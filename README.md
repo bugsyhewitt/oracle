@@ -69,7 +69,7 @@ bytecode directly needs no `solc` at all.**
 ```
 oracle --contract PATH
        --input-type {sol,bytecode}
-       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,reentrancy-cross-function,access-control,tx-origin,delegatecall,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,insufficient-gas-griefing,all}]
+       [--check {assertion,overflow,underflow,selfdestruct,unprotected-selfdestruct,ether-leak,storage-write,reentrancy,reentrancy-cross-function,access-control,tx-origin,delegatecall,delegatecall-selfdestruct,unchecked-call,dos-failed-call,timestamp,ether-withdrawal,gas-limit-dos,extcodesize-check,strict-balance,blockhash-randomness,tx-order,arbitrary-jump,prevrandao-randomness,write-arbitrary-storage,signature-replay,signature-malleability,hardcoded-gas,insufficient-gas-griefing,all}]
        [--max-depth N]            # default 12
        [--sequence-depth N]       # default 1
        [--timeout SECONDS]        # default 30 (0 = no limit)
@@ -352,6 +352,44 @@ compile-time constant, not attacker-controllable, and is **not** flagged — whi
 keeps the detector to the specific untrusted-callee bug rather than every
 upgradeable-proxy pattern. (This is distinct from `access-control`, which flags
 an *unguarded* `delegatecall` regardless of where the target comes from.)
+
+### `delegatecall-selfdestruct` — SELFDESTRUCT reachable via untrusted delegatecall (SWC-112 + SWC-106)
+
+```bash
+oracle --contract tests/fixtures/delegatecall-selfdestruct-vuln.sol \
+       --input-type sol --check delegatecall-selfdestruct --format json
+```
+
+Flags a contract that **both** (a) has a reachable `DELEGATECALL`/`CALLCODE`
+to an attacker-controllable target **and** (b) exposes a reachable
+`SELFDESTRUCT` on any execution path (`category: "delegatecall_selfdestruct"`,
+severity `high`). Because `delegatecall` runs the callee's code in **this**
+contract's storage and balance context, a malicious library that calls
+`selfdestruct(attacker)` destroys the *host* contract and sweeps its entire
+balance when delegatecalled — the host's reachable `SELFDESTRUCT` path is
+triggerable from the attacker-controlled delegate.
+`delegatecall-selfdestruct-vuln.sol` has a calldata-supplied `forward(address
+target, ...)` that delegatecalls the supplied target, and a `kill(recipient)`
+that calls `selfdestruct`. Both components are reachable, so the contract is
+flagged.
+
+Detection is a **cross-path composition** signal: oracle explores all dispatch
+paths. If any path exposes an untrusted delegatecall and any path has a
+reachable `SELFDESTRUCT`, the contract has both necessary components — and
+because `delegatecall` runs callee code in the host's full context, the
+attacker-supplied callee can route into any reachable SELFDESTRUCT path. A
+contract whose delegatecall uses a hard-coded library address
+(`delegatecall-selfdestruct-safe.sol`) is **not** flagged even if it also has
+a `kill()` function, because the delegatecall target is not
+attacker-controllable.
+
+This is distinct from both `delegatecall` (which fires on the untrusted
+target alone, without requiring a SELFDESTRUCT co-signal) and
+`unprotected-selfdestruct` (which fires on an unguarded SELFDESTRUCT without
+requiring an untrusted delegatecall). The composition here has a higher
+severity because the attacker both controls the execution path into the
+SELFDESTRUCT **and** controls it through a mechanism that runs in the host's
+own context.
 
 ### `unchecked-call` — unchecked call return value (SWC-104)
 

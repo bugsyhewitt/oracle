@@ -54,6 +54,7 @@ _TITLE = {
     "signature_malleability": "Signature Malleability (SWC-117)",
     "hardcoded_gas_call": "Message call with hardcoded gas amount (SWC-134)",
     "insufficient_gas_griefing": "Insufficient Gas Griefing (SWC-126)",
+    "delegatecall_selfdestruct": "SELFDESTRUCT reachable via Untrusted Delegatecall (SWC-112+SWC-106)",
 }
 
 # Highest-to-lowest banding order used in the summary block.
