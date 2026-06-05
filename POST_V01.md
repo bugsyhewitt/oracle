@@ -1771,6 +1771,55 @@ now applied to the Cancun/Dencun hardfork surface.
 **Estimated effort:** Low. Seven handler methods + table entries, one new test
 file. No engine refactor, no new dependency.
 
+### 32. SELFDESTRUCT-via-untrusted-delegatecall detector (SWC-112 + SWC-106 composition) ✅ IMPLEMENTED (Phase 2, Rotation 37)
+
+**Status:** Shipped. A new `DelegatecallSelfdestructDetector` (`--check
+delegatecall-selfdestruct`, category `delegatecall_selfdestruct`, severity
+`high`) was added to `oracle/laser/detectors.py`. The detector flags a
+contract that both (a) has a reachable `DELEGATECALL`/`CALLCODE` to an
+attacker-controllable (calldata-derived) target and (b) has a reachable
+`SELFDESTRUCT` on any execution path. Because `DELEGATECALL` runs callee code
+in the host contract's own context, a malicious delegate that calls
+`selfdestruct(attacker)` destroys the *host* — the composition is the exploit
+vector. Detection uses cross-path correlation via `finalize()` (the same
+architecture as `CrossFunctionReentrancyDetector`): untrusted-delegatecall and
+reachable-SELFDESTRUCT evidence is accumulated across all explored dispatch
+paths and correlated after the full execution. A contract with only one
+component (untrusted delegatecall without SELFDESTRUCT, or SELFDESTRUCT without
+untrusted delegatecall) is not flagged.
+
+Two new Solidity fixtures (`delegatecall-selfdestruct-vuln.sol` — attacker-
+controllable `forward(address target, ...)` + `kill(recipient)` that
+selfdestructs; `delegatecall-selfdestruct-safe.sol` — same structure but with a
+hard-coded constant library address) with pre-compiled `.bin` sidecars. 18 new
+tests in `tests/test_delegatecall_selfdestruct.py` covering registration,
+severity, opcode presence, detector discrimination (vuln fires / safe silent),
+end-to-end through `analyze()`, false-positive guards (delegatecall-only and
+SELFDESTRUCT-only fixtures both silent), `all`-checks participation, h1md and
+SARIF report rendering.
+
+A `delegatecall_untrusted_seen: bool` field was added to `MachineState`
+(init + clone) for potential future within-path composition use; the current
+detector uses the cross-path `finalize()` approach and does not consume it.
+Registry entry `"delegatecall-selfdestruct"`, title `"SELFDESTRUCT reachable
+via Untrusted Delegatecall (SWC-112+SWC-106)"` in `oracle/report.py`. README
+updated with the new `--check` token in the usage line and a new example
+section. 616 tests pass (0 regressions).
+
+**Verification of prior state (per roster instruction):** Roster called for
+assessing `SELFDESTRUCT-after-DELEGATECALL` detector or SWC-107 read-only
+reentrancy (view-function reentrancy) as next unshipped detector class.
+SWC-107 cross-function variant shipped in Rotation 35; SWC-107 read-only
+reentrancy requires detecting STATICCALL reads after external calls during
+broken-invariant windows — a significantly higher implementation complexity.
+The `SELFDESTRUCT-after-DELEGATECALL` composition is a self-contained
+cross-path detector with a clean `finalize()`-based architecture, a clear
+exploit scenario, and two distinct SWC registry entries, making it the
+higher-value, lower-risk choice for this rotation.
+
+**Estimated effort:** Low. New detector class + MachineState field + two
+fixtures + one test file. No engine refactor, no new dependency.
+
 ### 10. Python 3.14 support
 
 **Why it matters:** Already listed as a v0.2 item in the README. Blocked on

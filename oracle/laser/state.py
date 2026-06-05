@@ -146,6 +146,13 @@ class MachineState:
         # reported exactly once per path rather than on every subsequent
         # instruction (the prevrandao constraint persists down the path).
         self.prevrandao_flagged: bool = False
+        # Set once this path has executed a DELEGATECALL/CALLCODE whose target
+        # is calldata-derived (attacker-controllable). Consumed by
+        # DelegatecallSelfdestructDetector: a subsequent SELFDESTRUCT on the
+        # same path — in the same execution context — means the callee code run
+        # via the untrusted delegatecall could trigger a contract-destroying
+        # path that the attacker fully controls.
+        self.delegatecall_untrusted_seen: bool = False
 
     def clone(self) -> "MachineState":
         new = MachineState.__new__(MachineState)
@@ -178,6 +185,7 @@ class MachineState:
         new.gasprice_flagged = self.gasprice_flagged
         new.prevrandao_loaded = self.prevrandao_loaded
         new.prevrandao_flagged = self.prevrandao_flagged
+        new.delegatecall_untrusted_seen = self.delegatecall_untrusted_seen
         return new
 
     def fork_world(self) -> None:

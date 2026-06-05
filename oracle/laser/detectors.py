@@ -48,6 +48,7 @@ SEVERITY = {
     "signature_malleability": "medium",
     "hardcoded_gas_call": "medium",
     "insufficient_gas_griefing": "medium",
+    "delegatecall_selfdestruct": "high",
 }
 
 
@@ -683,6 +684,135 @@ class DelegatecallUntrustedDetector(DetectorHook):
             return  # hard-coded library / immutable implementation — trusted
         if _mentions_calldata(target, vm):
             self.findings.append(_finding(self.category, state, instruction, vm))
+
+
+class DelegatecallSelfdestructDetector(DetectorHook):
+    """Detects a contract that both (a) has a reachable `DELEGATECALL` /
+    `CALLCODE` to an attacker-controllable target and (b) has a reachable
+    `SELFDESTRUCT` on any execution path (SWC-112 + SWC-106 composition).
+
+    `DELEGATECALL` runs the **callee's code** in *this* contract's storage and
+    balance context. A malicious callee that executes `SELFDESTRUCT` destroys
+    the *host* contract and sweeps its entire balance — the destruction happens
+    in the caller's context. A contract that (a) delegatecalls an
+    attacker-controllable target and (b) exposes a reachable `SELFDESTRUCT` in
+    its own bytecode is exploitable: the attacker deploys a library whose
+    fallback calls `selfdestruct(attacker)`, passes its address to the
+    vulnerable dispatcher, and the host contract is destroyed and drained in a
+    single transaction. This is the composition of SWC-112 (delegatecall to
+    untrusted callee) with the self-destruct surface.
+
+    Note on oracle's bounded symbolic model: oracle does not execute callee
+    bytecode for DELEGATECALL — external call opcodes halt the symbolic path
+    (the callee is modelled conservatively). The composition is therefore
+    detected as a *cross-path* signal: oracle explores ALL dispatch paths in
+    the contract. A contract where one path (e.g. `forward()`) produces an
+    untrusted delegatecall, and another path (e.g. `kill()`) reaches a
+    SELFDESTRUCT, has both necessary components. Since `DELEGATECALL` runs
+    callee code in the host's *full* context, the callee can route execution
+    to any reachable path in the host — including the SELFDESTRUCT path. The
+    cross-path composition (delegatecall reachable on some path AND
+    SELFDESTRUCT reachable on some path) is therefore the correct model-sound
+    signal for this bug class.
+
+    Detection signal — two-component cross-path composition, correlated in
+    `finalize()` after all paths are explored:
+      1. **Untrusted delegatecall component**: any execution path encounters a
+         `DELEGATECALL` / `CALLCODE` whose target is calldata-derived (the
+         same `_mentions_calldata` gate as `DelegatecallUntrustedDetector`).
+         Each such delegatecall's state record is stored in `_dcall_records`.
+      2. **Reachable SELFDESTRUCT component**: any execution path reaches a
+         `SELFDESTRUCT`. Each such instruction/state record is stored in
+         `_sd_records`.
+      In `finalize()`: if both `_dcall_records` and `_sd_records` are
+      non-empty, emit one finding per distinct SELFDESTRUCT program counter.
+      The finding is emitted at the SELFDESTRUCT's state/instruction so the
+      report site is the destruction opcode — actionable as "this kill path
+      is reachable from a contract that accepts an attacker-controlled
+      delegatecall target."
+
+    This is deliberately distinct from the neighbouring detectors:
+      * `DelegatecallUntrustedDetector` (`delegatecall_untrusted_callee`)
+        flags the *delegatecall target* being attacker-controlled regardless
+        of any SELFDESTRUCT; its signal is higher recall. This detector
+        requires the SELFDESTRUCT co-signal for a more targeted
+        "attacker can destroy the contract" verdict.
+      * `UnprotectedSelfdestructDetector` (`unprotected_selfdestruct`, SWC-106)
+        flags a SELFDESTRUCT on a caller-unconstrained path regardless of any
+        delegatecall. The composition here is a different trigger: a correctly
+        owner-gated `selfdestruct()` that coexists with an untrusted delegatecall
+        is still flagged, because the delegatecall can supply a callee that
+        routes into the kill path in the host's context, bypassing the caller
+        guard in the original transaction's frame.
+      * `ReachableSelfdestructDetector` (`reachable_selfdestruct`) fires on
+        any reachable SELFDESTRUCT with no delegatecall requirement; the
+        broadest catch-all. This detector narrows the severity by requiring
+        the untrusted delegatecall co-signal.
+
+    [Worker decision: cross-path correlation via `finalize()` mirrors the
+    CrossFunctionReentrancyDetector architecture: per-path evidence is
+    accumulated during `inspect` and correlated across all paths in `finalize`.
+    This is sound for oracle's bounded model because the executor explores all
+    dispatch paths, so both the delegatecall path and the SELFDESTRUCT path
+    are always explored. The safe counterpart (hard-coded delegatecall target)
+    is correctly excluded by the `_mentions_calldata` gate on the delegatecall
+    target — a concrete target never produces a `_dcall_records` entry. The
+    approach avoids false-positives on contracts with a SELFDESTRUCT but no
+    untrusted delegatecall (no `_dcall_records` entry, so `finalize` is silent),
+    and on contracts with an untrusted delegatecall but no SELFDESTRUCT path.
+    A per-pc set in `finalize` reports each SELFDESTRUCT site once. The
+    `state.delegatecall_untrusted_seen` MachineState field added for the
+    per-path design is retained (zero cost: a bool) and unused by this
+    detector; future detectors may use it for within-path composition checks.]
+    """
+
+    category = "delegatecall_selfdestruct"
+
+    _DELEGATE_OPS = ("DELEGATECALL", "CALLCODE")
+
+    def __init__(self):
+        super().__init__()
+        # Evidence collected across all explored paths:
+        # records of untrusted delegatecall encounters (any path).
+        self._dcall_records = []
+        # records of reachable SELFDESTRUCT encounters (any path).
+        self._sd_records = []
+
+    def inspect(self, vm, state, instruction) -> None:
+        op = instruction.mnemonic
+        if op in self._DELEGATE_OPS:
+            if len(state.stack) < 2:
+                return
+            target = state.stack[-2]
+            if not _is_concrete(target) and _mentions_calldata(target, vm):
+                # Snapshot the record so finalize can access the state/instr.
+                self._dcall_records.append({
+                    "pc": instruction.pc,
+                    "state": state,
+                    "instruction": instruction,
+                })
+            return
+        if op == "SELFDESTRUCT":
+            self._sd_records.append({
+                "pc": instruction.pc,
+                "state": state,
+                "instruction": instruction,
+            })
+
+    def finalize(self, vm) -> None:
+        """Emit a finding for each reachable SELFDESTRUCT if the contract also
+        has a reachable untrusted delegatecall on any explored path."""
+        if not self._dcall_records or not self._sd_records:
+            return
+        emitted_pcs = set()
+        for rec in self._sd_records:
+            sd_pc = rec["pc"]
+            if sd_pc in emitted_pcs:
+                continue
+            emitted_pcs.add(sd_pc)
+            self.findings.append(
+                _finding(self.category, rec["state"], rec["instruction"], vm)
+            )
 
 
 class UncheckedCallReturnDetector(DetectorHook):
@@ -2501,6 +2631,7 @@ DETECTOR_REGISTRY = {
     "access-control": AccessControlEscalationDetector,
     "tx-origin": TxOriginAuthDetector,
     "delegatecall": DelegatecallUntrustedDetector,
+    "delegatecall-selfdestruct": DelegatecallSelfdestructDetector,
     "unchecked-call": UncheckedCallReturnDetector,
     "dos-failed-call": DosFailedCallDetector,
     "timestamp": TimestampDependenceDetector,
