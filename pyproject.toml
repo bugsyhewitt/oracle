@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oracle-symexec"
-version = "0.1.0"
+version = "1.0.0"
 description = "mythril's symbolic-execution capability, made install-clean on modern Python"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -42,6 +42,7 @@ include = ["oracle*"]
 [tool.pytest.ini_options]
 markers = [
     "slow: tests that invoke the real Z3 solver (excluded from default runs)",
+    "ship_gate: tests that build wheels and install into fresh venvs (excluded from fast inner-loop)",
 ]
 # Default run excludes slow (Z3-invoking) tests.
 addopts = "-m 'not slow'"
