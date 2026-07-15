@@ -63,6 +63,9 @@ class DetectorHook:
 
     def __init__(self):
         self.findings: List[dict] = []
+        # Per-PC deduplication set used by most detector subclasses to report
+        # each vulnerable site at most once across different execution paths.
+        self._flagged_pcs: set = set()
 
     def inspect(self, vm: "SymbolicVM", state: MachineState, instruction) -> None:
         raise NotImplementedError
@@ -235,6 +238,7 @@ class SymbolicVM:
         # record that this instruction was reached on some explored path
         self.visited_pcs.add(inst.pc)
         state.trace.append(TraceEntry(pc=inst.pc, op=op))
+        state.trace_pcs.add(inst.pc)
         handler = getattr(self, f"_op_{op.lower()}", None)
 
         if handler is None:
