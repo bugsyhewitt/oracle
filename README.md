@@ -1,5 +1,9 @@
 # oracle
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bugsyhewitt/bugsyhewitt.github.io/main/public/cards/oracle.jpg" alt="oracle" width="680">
+</p>
+
 **mythril's symbolic-execution capability, made install-clean on modern Python.**
 
 oracle symbolically executes EVM bytecode with the [Z3](https://github.com/Z3Prover/z3)
