@@ -18,6 +18,22 @@ from __future__ import annotations
 from oracle.laser.smt import UGT, And, BitVec
 from oracle.laser.vm import DetectorHook, _bvv
 
+# ---------------------------------------------------------------------- #
+# Shared opcode-set constants
+# ---------------------------------------------------------------------- #
+# Value-forwarding external-call ops that can hand control to an attacker
+# and trigger reentrancy (STATICCALL omitted — cannot transfer value or
+# mutate state, so it cannot enable a re-entrant *effect*).
+_REENTRANCY_CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL")
+
+# Ops that run callee code in the caller's storage context.
+_DELEGATE_OPS = ("DELEGATECALL", "CALLCODE")
+
+# Ops that can reach the ECRECOVER precompile (address 1).
+# STATICCALL is the Solidity-emitted form since Byzantium;
+# CALL covers pre-Byzantium / hand-rolled assembly.
+_ECRECOVER_OPS = ("STATICCALL", "CALL")
+
 
 SEVERITY = {
     "assertion_violation": "medium",
@@ -296,18 +312,13 @@ class ReentrancyDetector(DetectorHook):
 
     category = "reentrancy"
 
-    # opcodes that hand control to an external account while able to forward
-    # value (DELEGATECALL/CALLCODE run callee code in this contract's context
-    # and forward the current call's value). STATICCALL is deliberately absent.
-    _CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL")
-
     def inspect(self, vm, state, instruction) -> None:
         op = instruction.mnemonic
         if op == "SLOAD":
             if state.stack:
                 state.sloads_seen.add(_slot_key(state.stack[-1]))
             return
-        if op in self._CALL_OPS:
+        if op in _REENTRANCY_CALL_OPS:
             self._open_checkpoint(state)
             return
         if op == "SSTORE" and state.call_checkpoint:
@@ -397,8 +408,6 @@ class CrossFunctionReentrancyDetector(DetectorHook):
 
     category = "reentrancy_cross_function"
 
-    _CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL")
-
     def __init__(self):
         super().__init__()
         # per-call-site records collected when a value-forwarding CALL is
@@ -422,7 +431,7 @@ class CrossFunctionReentrancyDetector(DetectorHook):
             if state.stack:
                 state.sloads_seen.add(_slot_key(state.stack[-1]))
             return
-        if op in self._CALL_OPS:
+        if op in _REENTRANCY_CALL_OPS:
             # Open a per-path call checkpoint independently of the base
             # ReentrancyDetector so this detector works whether or not the
             # base detector is also registered (e.g. when invoked alone via
@@ -601,10 +610,6 @@ class TxOriginAuthDetector(DetectorHook):
 
     category = "tx_origin_authentication"
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         # Only meaningful once tx.origin has been read on this path. Cheap gate
         # before the (more expensive) constraint AST walk.
@@ -669,12 +674,8 @@ class DelegatecallUntrustedDetector(DetectorHook):
 
     category = "delegatecall_untrusted_callee"
 
-    # DELEGATECALL and CALLCODE both run callee code in the caller's storage
-    # context. STATICCALL/CALL keep their own context, so they are not SWC-112.
-    _OPS = ("DELEGATECALL", "CALLCODE")
-
     def inspect(self, vm, state, instruction) -> None:
-        if instruction.mnemonic not in self._OPS:
+        if instruction.mnemonic not in _DELEGATE_OPS:
             return
         # stack: gas, addr, argsOffset, argsLength, retOffset, retLength
         if len(state.stack) < 2:
@@ -768,8 +769,6 @@ class DelegatecallSelfdestructDetector(DetectorHook):
 
     category = "delegatecall_selfdestruct"
 
-    _DELEGATE_OPS = ("DELEGATECALL", "CALLCODE")
-
     def __init__(self):
         super().__init__()
         # Evidence collected across all explored paths:
@@ -780,7 +779,7 @@ class DelegatecallSelfdestructDetector(DetectorHook):
 
     def inspect(self, vm, state, instruction) -> None:
         op = instruction.mnemonic
-        if op in self._DELEGATE_OPS:
+        if op in _DELEGATE_OPS:
             if len(state.stack) < 2:
                 return
             target = state.stack[-2]
@@ -860,10 +859,6 @@ class UncheckedCallReturnDetector(DetectorHook):
 
     category = "unchecked_call_return"
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic != "POP":
             return
@@ -930,19 +925,15 @@ class DosFailedCallDetector(DetectorHook):
 
     _CALL_OPS = ("CALL", "CALLCODE", "DELEGATECALL", "STATICCALL")
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic not in self._CALL_OPS:
             return
         if instruction.pc in self._flagged_pcs:
             return
         # The hook runs BEFORE the instruction executes, so this pc is not yet
-        # on the trace. If it is already present, the call site has been reached
+        # in trace_pcs. If it is already present, the call site has been reached
         # before on this path — it is inside a loop body that has iterated.
-        if any(t.pc == instruction.pc for t in state.trace):
+        if instruction.pc in state.trace_pcs:
             self._flagged_pcs.add(instruction.pc)
             self.findings.append(_finding(self.category, state, instruction, vm))
 
@@ -1001,10 +992,6 @@ class TimestampDependenceDetector(DetectorHook):
     # VM (TIMESTAMP -> "timestamp", NUMBER -> "block_number") and set the
     # per-path `blockval_loaded` latch when read.
     _BLOCKVAL_NAMES = ("timestamp", "block_number")
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
 
     def inspect(self, vm, state, instruction) -> None:
         # Only meaningful once a block value has been read on this path. Cheap
@@ -1090,10 +1077,6 @@ class UnprotectedEtherWithdrawalDetector(DetectorHook):
     # STATICCALL cannot move the contract's balance, so they are out of scope.
     _VALUE_CALL_OPS = ("CALL", "CALLCODE")
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic not in self._VALUE_CALL_OPS:
             return
@@ -1178,10 +1161,6 @@ class UnprotectedSelfdestructDetector(DetectorHook):
 
     category = "unprotected_selfdestruct"
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic != "SELFDESTRUCT":
             return
@@ -1253,21 +1232,17 @@ class BlockGasLimitDosDetector(DetectorHook):
 
     category = "block_gas_limit_dos"
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic != "SLOAD":
             return
         if instruction.pc in self._flagged_pcs:
             return
         # The hook runs BEFORE the instruction executes, so this pc is not yet
-        # on the trace. If it is already present, the storage read has been
+        # in trace_pcs. If it is already present, the storage read has been
         # reached before on this path — it is inside a loop body that has
         # iterated, so the loop re-reads contract state every iteration and is
         # unbounded in that (growable) state: a block-gas-limit DoS.
-        if any(t.pc == instruction.pc for t in state.trace):
+        if instruction.pc in state.trace_pcs:
             self._flagged_pcs.add(instruction.pc)
             self.findings.append(_finding(self.category, state, instruction, vm))
 
@@ -1323,10 +1298,6 @@ class ExtcodesizeCallerCheckDetector(DetectorHook):
     """
 
     category = "extcodesize_caller_check"
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
 
     def inspect(self, vm, state, instruction) -> None:
         if state.extcodesize_flagged:
@@ -1406,10 +1377,6 @@ class StrictBalanceEqualityDetector(DetectorHook):
     """
 
     category = "strict_balance_equality"
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
 
     def inspect(self, vm, state, instruction) -> None:
         if state.balance_flagged:
@@ -1492,10 +1459,6 @@ class BlockhashRandomnessDetector(DetectorHook):
     """
 
     category = "blockhash_randomness"
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
 
     def inspect(self, vm, state, instruction) -> None:
         # Only meaningful once a block hash has been read on this path. Cheap gate
@@ -1587,10 +1550,6 @@ class TransactionOrderDependenceDetector(DetectorHook):
 
     category = "transaction_order_dependence"
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         # Only meaningful once the gas price has been read on this path. Cheap
         # gate before the (more expensive) constraint AST walk.
@@ -1681,10 +1640,6 @@ class PrevrandaoRandomnessDetector(DetectorHook):
 
     category = "prevrandao_randomness"
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         # Only meaningful once prevrandao has been read on this path. Cheap gate
         # before the (more expensive) constraint AST walk.
@@ -1762,10 +1717,6 @@ class ArbitraryJumpDetector(DetectorHook):
 
     _OPS = ("JUMP", "JUMPI")
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic not in self._OPS:
             return
@@ -1837,10 +1788,6 @@ class WriteArbitraryStorageDetector(DetectorHook):
     """
 
     category = "write_arbitrary_storage"
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
 
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic != "SSTORE":
@@ -1949,18 +1896,8 @@ class SignatureReplayDetector(DetectorHook):
 
     category = "signature_replay"
 
-    # STATICCALL is the Solidity-emitted form for `ecrecover(...)` since the
-    # Byzantium fork; CALL is included for pre-Byzantium / hand-rolled
-    # assembly. DELEGATECALL/CALLCODE cannot reach a precompile usefully in
-    # the Solidity-source sense and are intentionally out of scope.
-    _OPS = ("STATICCALL", "CALL")
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
-        if instruction.mnemonic not in self._OPS:
+        if instruction.mnemonic not in _ECRECOVER_OPS:
             return
         # Stack layout (top→):
         #   STATICCALL: gas, addr, argsOff, argsLen, retOff, retLen
@@ -2110,10 +2047,6 @@ class HardcodedGasCallDetector(DetectorHook):
     # the `transfer`/`send` source form does not lower to them — they are
     # intentionally out of scope.
     _OPS = ("CALL", "CALLCODE")
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
 
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic not in self._OPS:
@@ -2266,10 +2199,6 @@ class InsufficientGasGriefingDetector(DetectorHook):
     # call OOGs (the inner failure surfaces as a 0 retval, not a revert).
     _OPS = ("CALL", "CALLCODE", "STATICCALL", "DELEGATECALL")
 
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
         if instruction.mnemonic not in self._OPS:
             return
@@ -2384,18 +2313,8 @@ class SignatureMalleabilityDetector(DetectorHook):
 
     category = "signature_malleability"
 
-    # Same scope as the SWC-121 detector: STATICCALL is the Solidity-emitted
-    # form for `ecrecover(...)` since Byzantium; CALL covers pre-Byzantium /
-    # hand-rolled assembly. DELEGATECALL/CALLCODE cannot reach a precompile
-    # usefully in the Solidity-source sense and are intentionally out of scope.
-    _OPS = ("STATICCALL", "CALL")
-
-    def __init__(self):
-        super().__init__()
-        self._flagged_pcs = set()
-
     def inspect(self, vm, state, instruction) -> None:
-        if instruction.mnemonic not in self._OPS:
+        if instruction.mnemonic not in _ECRECOVER_OPS:
             return
         # Stack layout (top→):
         #   STATICCALL: gas, addr, argsOff, argsLen, retOff, retLen
@@ -2483,32 +2402,47 @@ def _caller_symbol_name(vm) -> str:
         return "caller"
 
 
-def _ast_mentions(node, target_name: str) -> bool:
-    """True if the z3 AST rooted at `node` contains a leaf named `target_name`."""
+def _ast_leaves(node):
+    """Yield the declaration name of every leaf in the z3 AST rooted at *node*.
+
+    Traverses the expression tree depth-first, visiting each node at most once
+    (memoised by z3 node id). Yields the string returned by `decl().name()` for
+    each 0-argument ExprRef. Non-z3 values and import failures produce no yields.
+    """
     try:
         import z3
     except Exception:
-        return False
+        return
     raw = node.raw if hasattr(node, "raw") else node
     if not isinstance(raw, z3.AstRef):
-        return False
-    stack = [raw]
-    seen = set()
-    while stack:
-        cur = stack.pop()
+        return
+    stk = [raw]
+    seen: set = set()
+    while stk:
+        cur = stk.pop()
         key = cur.get_id() if hasattr(cur, "get_id") else id(cur)
         if key in seen:
             continue
         seen.add(key)
-        if isinstance(cur, z3.ExprRef):
+        if not isinstance(cur, z3.ExprRef):
+            continue
+        try:
+            n_args = cur.num_args()
+        except Exception:
+            continue
+        if n_args == 0:
             try:
-                if cur.num_args() == 0 and cur.decl().name() == target_name:
-                    return True
+                yield cur.decl().name()
             except Exception:
                 pass
-            for i in range(cur.num_args()):
-                stack.append(cur.arg(i))
-    return False
+        else:
+            for i in range(n_args):
+                stk.append(cur.arg(i))
+
+
+def _ast_mentions(node, target_name: str) -> bool:
+    """True if the z3 AST rooted at `node` contains a leaf named `target_name`."""
+    return any(n == target_name for n in _ast_leaves(node))
 
 
 def _mentions_caller(bv, vm) -> bool:
@@ -2517,41 +2451,11 @@ def _mentions_caller(bv, vm) -> bool:
 
 
 def _ast_mentions_prefix(node, prefix: str) -> bool:
-    """True if the z3 AST rooted at `node` contains a leaf whose name starts
-    with `prefix` — used to match the calldata symbol *family* (`calldata`,
+    """True if the z3 AST rooted at `node` contains a leaf whose name contains
+    `prefix` — used to match the calldata symbol *family* (`calldata`,
     `calldata_<offset>`, `calldata_dyn`, and their per-epoch-prefixed variants)
     without enumerating every materialised offset."""
-    try:
-        import z3
-    except Exception:
-        return False
-    raw = node.raw if hasattr(node, "raw") else node
-    if not isinstance(raw, z3.AstRef):
-        return False
-    stack = [raw]
-    seen = set()
-    while stack:
-        cur = stack.pop()
-        key = cur.get_id() if hasattr(cur, "get_id") else id(cur)
-        if key in seen:
-            continue
-        seen.add(key)
-        if isinstance(cur, z3.ExprRef):
-            try:
-                if cur.num_args() == 0:
-                    name = cur.decl().name()
-                    # match the calldata family at the bare or epoch-prefixed
-                    # form (epoch prefixes are like "tx1_"); a plain
-                    # `name.startswith(prefix)` covers the bare case and any
-                    # suffix (offset) case, and we additionally allow an epoch
-                    # prefix before the family name.
-                    if prefix in name:
-                        return True
-            except Exception:
-                pass
-            for i in range(cur.num_args()):
-                stack.append(cur.arg(i))
-    return False
+    return any(prefix in n for n in _ast_leaves(node))
 
 
 def _mentions_calldata(bv, vm) -> bool:

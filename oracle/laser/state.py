@@ -41,6 +41,10 @@ class MachineState:
         # path constraints accumulated along this execution
         self.constraints: List = []
         self.trace: List[TraceEntry] = []
+        # O(1) membership test counterpart to `trace` — contains the same PCs.
+        # Maintained alongside trace in vm._step so detectors can check whether
+        # a PC recurred on this path without a linear scan of the trace list.
+        self.trace_pcs: Set[int] = set()
         self.halted: bool = False
         self.reverted: bool = False
         # Reentrancy tracking (consumed by ReentrancyDetector). These live on
@@ -163,6 +167,7 @@ class MachineState:
         new.depth = self.depth
         new.constraints = list(self.constraints)
         new.trace = list(self.trace)
+        new.trace_pcs = set(self.trace_pcs)
         new.halted = self.halted
         new.reverted = self.reverted
         # copy reentrancy tracking so each forked path carries its own history
