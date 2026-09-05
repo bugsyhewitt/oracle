@@ -39,6 +39,9 @@ Homepage = "https://github.com/bugsyhewitt/oracle"
 [tool.setuptools.packages.find]
 include = ["oracle*"]
 
+[tool.ruff]
+line-length = 88
+
 [tool.pytest.ini_options]
 markers = [
     "slow: tests that invoke the real Z3 solver (excluded from default runs)",

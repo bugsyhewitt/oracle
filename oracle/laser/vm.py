@@ -640,11 +640,11 @@ class SymbolicVM:
         state.pc = inst.pc + 1
         return [state]
 
-    _op_gas = lambda self, s, i: self._generic_env(s, i, "gas")
-    _op_gaslimit = lambda self, s, i: self._generic_env(s, i, "gaslimit")
-    _op_coinbase = lambda self, s, i: self._generic_env(s, i, "coinbase")
-    _op_chainid = lambda self, s, i: self._generic_env(s, i, "chainid")
-    _op_msize = lambda self, s, i: self._generic_env(s, i, "msize")
+    def _op_gas(self, s, i): return self._generic_env(s, i, "gas")
+    def _op_gaslimit(self, s, i): return self._generic_env(s, i, "gaslimit")
+    def _op_coinbase(self, s, i): return self._generic_env(s, i, "coinbase")
+    def _op_chainid(self, s, i): return self._generic_env(s, i, "chainid")
+    def _op_msize(self, s, i): return self._generic_env(s, i, "msize")
 
     def _op_basefee(self, state, inst):
         # BASEFEE (EIP-3198, London): current block base fee in wei. Unknown
